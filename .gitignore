@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+venv
+
+# Scrapy
+*.log
+.scrapy/
+
+# Env
+.env
+
+# Editor
+.vscode/
+.idea/
