@@ -25,3 +25,7 @@ USER_AGENT = 'ResearchBot-StudentProject (+http://www.yourdomain.com)'
 
 # Disable Telnet Console (Security)
 TELNETCONSOLE_ENABLED = False
+
+ITEM_PIPELINES = {
+   "crawler_engine.pipelines.ElasticsearchPipeline": 300,
+}
