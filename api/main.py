@@ -69,8 +69,19 @@ def search(q: str, module: str = "general"):
 @app.post("/crawl")
 def trigger_crawl(request: CrawlRequest):
     """
-    Admin endpoint to manually start crawling a URL.
+    Smart Dispatcher: Sends the URL to the correct Spider Queue.
     """
-    # Push the URL to the Redis queue our Spider is listening to
-    r.lpush('master:start_urls', request.url)
-    return {"message": f"Spider dispatched to {request.url}", "module": request.module}
+    if request.module == "news":
+        # Push to the News Spider's queue
+        r.lpush('news:start_urls', request.url)
+        queue_name = "news:start_urls"
+    else:
+        # Push to the General Spider's queue
+        r.lpush('master:start_urls', request.url)
+        queue_name = "master:start_urls"
+
+    return {
+        "message": f"Spider dispatched to {request.url}", 
+        "module": request.module,
+        "queue": queue_name
+    }
