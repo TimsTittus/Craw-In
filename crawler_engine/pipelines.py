@@ -1,9 +1,11 @@
 import hashlib
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, helpers
 
 class ElasticsearchPipeline:
     def __init__(self):
         self.es = Elasticsearch("http://localhost:9200")
+        self.items_buffer = []
+        self.buffer_size = 100 # Adjustable batch size
 
     def process_item(self, item, spider):
         # 1. Generate ID
@@ -18,17 +20,38 @@ class ElasticsearchPipeline:
         else:
             target_index = "web_search"
 
-        # 3. Define Document
+        # 3. Define Document Action for Bulk
         document = {
-            'url': item['url'],
-            'title': item.get('title'),
-            'content': item.get('content'), # Can be raw text or list
-            'timestamp': 'now',
-            'module': spider.name
+            '_index': target_index,
+            '_id': doc_id,
+            '_source': {
+                'url': item['url'],
+                'title': item.get('title'),
+                'content': item.get('content'), # Can be raw text or list
+                'timestamp': 'now',
+                'module': spider.name
+            }
         }
 
-        # 4. Save to Database
-        self.es.index(index=target_index, id=doc_id, document=document)
-        print(f"✅ Indexed in [{target_index}]: {item['title']}")
+        # 4. Add to Buffer
+        self.items_buffer.append(document)
+
+        # 5. Flush if buffer full
+        if len(self.items_buffer) >= self.buffer_size:
+            self._flush()
 
         return item
+
+    def close_spider(self, spider):
+        # Flush remaining items when spider closes
+        self._flush()
+
+    def _flush(self):
+        if self.items_buffer:
+            try:
+                helpers.bulk(self.es, self.items_buffer)
+                print(f"✅ Bulk Indexed {len(self.items_buffer)} items")
+            except Exception as e:
+                print(f"❌ Error indexing batch: {e}")
+            finally:
+                self.items_buffer = []
