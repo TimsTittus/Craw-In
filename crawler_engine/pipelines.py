@@ -3,26 +3,32 @@ from elasticsearch import Elasticsearch
 
 class ElasticsearchPipeline:
     def __init__(self):
-        # Connect to our local database
         self.es = Elasticsearch("http://localhost:9200")
 
     def process_item(self, item, spider):
-        # 1. Create a unique ID for the page (using URL hash)
-        # This prevents duplicate entries if we crawl the same page twice.
+        # 1. Generate ID
         doc_id = hashlib.sha256(item['url'].encode('utf-8')).hexdigest()
 
-        # 2. Define the document structure
+        # 2. Decide Destination Index based on Spider Name
+        if spider.name == 'news_spider':
+            target_index = "news_search"
+            # For news, we might want to join the paragraph list into a single string
+            if isinstance(item.get('content'), list):
+                item['content'] = " ".join(item['content'])
+        else:
+            target_index = "web_search"
+
+        # 3. Define Document
         document = {
             'url': item['url'],
             'title': item.get('title'),
-            'content': item.get('status'), # Storing status for now
-            'timestamp': 'now' # Elastic will auto-date this
+            'content': item.get('content'), # Can be raw text or list
+            'timestamp': 'now',
+            'module': spider.name
         }
 
-        # 3. Index the document (Upsert: Update if exists, Insert if new)
-        self.es.index(index="web_search", id=doc_id, document=document)
-
-        # Print to console so you know it worked
-        print(f"✅ Indexed: {item['url']}")
+        # 4. Save to Database
+        self.es.index(index=target_index, id=doc_id, document=document)
+        print(f"✅ Indexed in [{target_index}]: {item['title']}")
 
         return item
