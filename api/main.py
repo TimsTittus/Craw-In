@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from elasticsearch import Elasticsearch
 from pydantic import BaseModel
@@ -5,6 +6,13 @@ import redis
 
 app = FastAPI(title="OmniCrawler Search Engine")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # --- CONNECTIONS ---
 # Connect to the Brain (Elasticsearch)
 es = Elasticsearch("http://localhost:9200")
