@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>OmniSearch</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            text-align: center;
+        }
+
+        input {
+            padding: 10px;
+            width: 60%;
+            font-size: 16px;
+        }
+
+        select {
+            padding: 10px;
+            font-size: 16px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+        }
+
+        .result {
+            text-align: left;
+            margin-top: 20px;
+            padding: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .result h3 {
+            margin: 0;
+            color: #1a0dab;
+        }
+
+        .result a {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        .result p {
+            color: #545454;
+            font-size: 14px;
+        }
+
+        .badge {
+            background: #eee;
+            padding: 2px 6px;
+            font-size: 12px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>OmniSearch</h1>
+
+    <div>
+        <input type="text" id="query" placeholder="What are you looking for?">
+        <select id="module">
+            <option value="general">🌍 General Web</option>
+            <option value="news">📰 News</option>
+        </select>
+        <button onclick="performSearch()">Search</button>
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        async function performSearch() {
+            const query = document.getElementById('query').value;
+            const module = document.getElementById('module').value;
+            const resultsDiv = document.getElementById('results');
+
+            resultsDiv.innerHTML = "Searching...";
+
+            const response = await fetch(`http://127.0.0.1:8000/search?q=${query}&module=${module}`);
+            const data = await response.json();
+
+            resultsDiv.innerHTML = ""; // Clear loading text
+
+            if (data.results.length === 0) {
+                resultsDiv.innerHTML = "<p>No results found. Try crawling some data first!</p>";
+                return;
+            }
+
+            data.results.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'result';
+                div.innerHTML = `
+                    <h3><a href="${item.url}" target="_blank">${item.title || "No Title"}</a></h3>
+                    <p><span class="badge">${module}</span> ${item.url}</p>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        }
+    </script>
+</body>
+
+</html>
