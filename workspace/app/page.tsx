@@ -261,6 +261,18 @@ export default function WorkspaceDashboard() {
               </div>
             )}
 
+            {result && (
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold text-slate-200 mb-4 flex items-center gap-2 font-mono">
+                  <Search className="h-4 w-4 text-cyan-400" />
+                  Extracted Details
+                </h3>
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 text-slate-300 font-mono text-xs whitespace-pre-wrap max-h-[400px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 break-words">
+                  {result}
+                </div>
+              </div>
+            )}
+
           </div>
 
           {/* Right Column (Agent Terminal WebSocket Monitor) */}

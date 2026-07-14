@@ -1,0 +1,10 @@
+.venv
+venv
+__pycache__
+.pytest_cache
+workspace/node_modules
+workspace/.next
+.git
+*.pyc
+*.pyo
+keyword_store.db

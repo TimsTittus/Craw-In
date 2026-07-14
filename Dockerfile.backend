@@ -13,6 +13,10 @@ WORKDIR /app
 # Copy the virtual environment from the builder stage
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Playwright browsers and their system dependencies in the runtime stage
+RUN playwright install --with-deps chromium
+
 # Copy the application code
 COPY . .
 EXPOSE 8000

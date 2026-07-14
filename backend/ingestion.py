@@ -11,10 +11,14 @@ Provides an async ``ingest_urls`` function that:
 
 import asyncio
 from typing import List
+import trafilatura
 
 from .crawler import ConcurrentIngestionEngine
 from .search import SearchIndexingFabric, get_keyword_engine, add_keyword_document
 from fastembed import TextEmbedding
+from .plugins.playwright_ingestion_plugin import PlaywrightIngestionPlugin
+from .utils.concurrency import limited_playwright_scrape
+from .config import PLAYWRIGHT_TIMEOUT
 
 # FastEmbed instance (uses the default ``sentence-transformers/all-MiniLM-L6-v2`` model)
 embedder = TextEmbedding()
@@ -43,8 +47,9 @@ async def ingest_urls(urls: List[str], collection_name: str = "documents") -> No
             # Skip non‑200 responses; you can log or handle as needed
             continue
         text = result.get("content", "") or ""
+        source = result.get("source", "unknown")
         # Store in keyword DB
-        add_keyword_document(kw_session, title=url, content=text)
+        add_keyword_document(kw_session, title=url, content=text, source=source)
         # Compute embedding and upsert into Qdrant
         vector = list(embedder.embed([text]))[0].tolist()
         fabric.index_document(collection_name, doc_id=idx, vector=vector, payload={"url": url})

@@ -1,8 +1,14 @@
 import asyncio
 import httpx
 import trafilatura
+from .plugins.playwright_ingestion_plugin import PlaywrightIngestionPlugin
+from .utils.concurrency import limited_playwright_scrape
+from .config import PLAYWRIGHT_TIMEOUT
 from typing import Dict
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ConcurrentIngestionEngine:
     """Asynchronous crawler that fetches URLs concurrently, respects a
@@ -43,10 +49,23 @@ class ConcurrentIngestionEngine:
                     if response.status_code == 200:
                         downloaded = response.text
                         # trafilatura returns ``None`` when it cannot extract text
-                        extracted_text = trafilatura.extract(downloaded) or ""
-                        return {"url": url, "content": extracted_text, "status": 200}
+                        extracted_text = trafilatura.extract(downloaded)
+                        source = "trafilatura"
+                        if not extracted_text:
+                            print(f"[Craw-In Engine] trafilatura extracted 0 bytes for {url}. Switching to Playwright fallback...", flush=True)
+                            logger.info(f"Trafilatura returned empty text for {url}. Invoking Playwright fallback...")
+                            # Fallback to Playwright rendering for JS-heavy pages
+                            playwright_plugin = PlaywrightIngestionPlugin(timeout=PLAYWRIGHT_TIMEOUT)
+                            extracted_text = await limited_playwright_scrape(playwright_plugin, url) or ""
+                            source = "playwright"
+                            print(f"[Craw-In Engine] Playwright fallback completed for {url}. Extracted {len(extracted_text)} bytes.", flush=True)
+                            logger.info(f"Playwright fallback completed for {url}. Extracted {len(extracted_text)} characters.")
+                        else:
+                            print(f"[Craw-In Engine] trafilatura successfully extracted {len(extracted_text)} bytes for {url}.", flush=True)
+                            logger.info(f"Trafilatura successfully extracted {len(extracted_text)} characters for {url}.")
+                        return {"url": url, "content": extracted_text, "status": 200, "source": source}
                     # Non‑200 responses – graceful fallback
-                    return {"url": url, "content": "", "status": response.status_code}
+                    return {"url": url, "content": "", "status": response.status_code, "source": "none"}
             except httpx.RequestError as e:
                 # Catch DNS failures, connection timeouts, etc.
-                return {"url": url, "content": "", "status": 0}
+                return {"url": url, "content": "", "status": 0, "source": "none"}

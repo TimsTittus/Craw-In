@@ -1,5 +1,8 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
+import re
+from backend.ingestion import ingest_urls
+from backend.search import get_keyword_engine, KeywordDocument
 
 app = FastAPI(title='InfoOS Core')
 
@@ -79,26 +82,58 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     
                     # Send final detailed output after the steps complete
                     try:
-                        import re
-                        from backend.ingestion import ingest_urls
-                        from backend.search import get_keyword_engine, KeywordDocument
+                        # Extract URL from prompt (support domains without http)
+                        urls = re.findall(r'(https?://[^\s]+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)', prompt)
+                        target_url = None
+                        if urls:
+                            target_url = urls[0]
+                            if not target_url.startswith('http'):
+                                target_url = 'https://' + target_url
                         
-                        # Extract URL from prompt
-                        urls = re.findall(r'https?://[^\s]+', prompt)
-                        target_url = urls[0] if urls else None
+                        print(f"[main.py] Extracted target_url: {target_url} from prompt: {prompt}", flush=True)
+                        
+                        # Broadcast a "processing" telemetry step so the UI stays alive
+                        import datetime
+                        current_steps.append({
+                            "step": "Ingestion Pipeline",
+                            "status": "running",
+                            "details": f"Fetching and extracting content from {target_url}...",
+                            "timestamp": datetime.datetime.now().strftime("%H:%M:%S")
+                        })
+                        await manager.broadcast(json.dumps({
+                            "type": "telemetry",
+                            "status": "running",
+                            "steps": current_steps
+                        }))
                         
                         docs_filtered = []
                         if target_url:
+                            print(f"[main.py] Starting ingest_urls for {target_url}...", flush=True)
                             # Actually run the real ingestion pipeline for the found URL!
                             await ingest_urls([target_url])
+                            print(f"[main.py] ingest_urls completed for {target_url}", flush=True)
                             
                             session = get_keyword_engine()
                             # Fetch only the document that matches the URL
                             docs = session.query(KeywordDocument).filter(KeywordDocument.title.like(f"%{target_url}%")).all()
                             docs_filtered = docs
+                            print(f"[main.py] Found {len(docs_filtered)} docs in keyword store", flush=True)
                         else:
+                            print(f"[main.py] No URL found in prompt, searching keyword store for '{prompt}'", flush=True)
                             session = get_keyword_engine()
-                            docs_filtered = session.query(KeywordDocument).all()
+                            docs_filtered = session.query(KeywordDocument).filter(
+                                KeywordDocument.content.like(f"%{prompt}%") | 
+                                KeywordDocument.title.like(f"%{prompt}%")
+                            ).all()
+
+                        # Update telemetry to completed
+                        current_steps[-1]["status"] = "completed"
+                        current_steps[-1]["details"] = f"Processed request. Found {len(docs_filtered)} documents."
+                        await manager.broadcast(json.dumps({
+                            "type": "telemetry",
+                            "status": "completed",
+                            "steps": current_steps
+                        }))
 
                         results_text = []
                         analyzed_results = []
@@ -111,17 +146,21 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                                 "title": d.title,
                                 "source": "SQLite Indexer",
                                 "confidence": 0.99,
-                                "indicators": ["Context Extracted", "Verified DB Record"]
+                                "indicators": [f"Extracted via {getattr(d, 'source', 'trafilatura')}", "Verified DB Record"]
                             })
                         
                         final_output = "\n\n---\n\n".join(results_text) if results_text else "No documents found in the database matching the requested URL."
                         
+                        print(f"[main.py] Broadcasting result with {len(docs_filtered)} docs, content length: {len(final_output)}", flush=True)
                         await manager.broadcast(json.dumps({
                             "type": "result",
                             "content": f"✅ Reasoning complete. Found {len(docs_filtered)} documents matching context:\n\n{final_output}",
                             "results_json": analyzed_results
                         }))
                     except Exception as e:
+                        import traceback
+                        error_tb = traceback.format_exc()
+                        print(f"[main.py] ERROR in ingestion pipeline: {e}\n{error_tb}", flush=True)
                         await manager.broadcast(json.dumps({
                             "type": "result",
                             "content": f"⚠️ Error querying vector/keyword stores: {str(e)}"

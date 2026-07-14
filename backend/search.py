@@ -88,23 +88,27 @@ class KeywordDocument(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(Text, nullable=False)
     content = Column(Text, nullable=False)
+    source = Column(Text, nullable=True)
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<KeywordDocument id={self.id!r} title={self.title!r}>"
+        return f"<KeywordDocument id={self.id!r} title={self.title!r} source={self.source!r}>"
 
-def get_keyword_engine(db_url: str = "sqlite:///keyword_store.db") -> Session:
+def get_keyword_engine(db_url: str = None) -> Session:
     """Create a SQLAlchemy session bound to the lightweight keyword store.
 
-    Returns an active ``Session`` that callers can use to add or query
-    ``KeywordDocument`` records.
+    The SQLite file is placed at an absolute path ``/app/keyword_store.db`` which
+    is guaranteed to be writable inside the Docker container. If ``db_url`` is
+    provided it overrides the default.
     """
+    if not db_url:
+        db_url = "sqlite:////app/keyword_store.db"
     engine = create_engine(db_url, echo=False, future=True)
     Base.metadata.create_all(engine)
     return Session(engine)
 
-def add_keyword_document(session: Session, title: str, content: str) -> KeywordDocument:
+def add_keyword_document(session: Session, title: str, content: str, source: str = None) -> KeywordDocument:
     """Insert a new document into the keyword store and return the ORM object."""
-    doc = KeywordDocument(title=title, content=content)
+    doc = KeywordDocument(title=title, content=content, source=source)
     session.add(doc)
     session.commit()
     session.refresh(doc)
