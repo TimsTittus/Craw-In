@@ -16,6 +16,8 @@ import {
   Network,
   Cpu
 } from "lucide-react";
+import { CommandControllerPanel } from "@/components/ui/command-controller";
+import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-display";
 
 interface LogStep {
   step: string;
@@ -29,6 +31,7 @@ export default function WorkspaceDashboard() {
   const [prompt, setPrompt] = useState("");
   const [logs, setLogs] = useState<LogStep[]>([]);
   const [result, setResult] = useState<string | null>(null);
+  const [analyzedResults, setAnalyzedResults] = useState<AnalyzedResult[]>([]);
   const [connected, setConnected] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
@@ -62,6 +65,9 @@ export default function WorkspaceDashboard() {
           }
         } else if (data.type === "result") {
           setResult(data.content);
+          if (data.results_json) {
+            setAnalyzedResults(data.results_json);
+          }
         } else {
           // Fallback if raw text or other payload format is sent
           addLocalLog(data.step || "Update", data.status || "completed", data.details || event.data);
@@ -110,8 +116,8 @@ export default function WorkspaceDashboard() {
     ]);
   };
 
-  const triggerPlanner = () => {
-    if (!prompt.trim()) return;
+  const triggerPlanner = (queryText: string = prompt) => {
+    if (!queryText.trim()) return;
     if (!connected || !socketRef.current) {
       addLocalLog("System", "failed", "Cannot run plan: WebSocket not connected.");
       return;
@@ -120,15 +126,16 @@ export default function WorkspaceDashboard() {
     setIsRunning(true);
     setLogs([]); // Reset logs for the new run
     setResult(null);
+    setAnalyzedResults([]);
 
     // Send command payload over the WebSocket link
     const payload = {
       action: "run_agent",
-      prompt: prompt,
+      prompt: queryText,
     };
 
     socketRef.current.send(JSON.stringify(payload));
-    addLocalLog("Dispatcher", "running", `Dispatched planning task: "${prompt}"`);
+    addLocalLog("Dispatcher", "running", `Dispatched planning task: "${queryText}"`);
   };
 
   return (
@@ -184,40 +191,12 @@ export default function WorkspaceDashboard() {
           {/* Left / Center Grid (Controls & Status Panels) */}
           <div className="lg:col-span-2 space-y-8">
 
-            {/* Input Planner Card */}
-            <Card className="bg-slate-900 border-slate-800 shadow-xl overflow-hidden relative group">
-              <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/5 to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
-              <CardHeader className="pb-4">
-                <CardTitle className="text-lg font-bold flex items-center gap-2 text-slate-100">
-                  <Search className="h-5 w-5 text-cyan-400" />
-                  Reasoning & Retrieval Planner
-                </CardTitle>
-                <CardDescription className="text-slate-400">
-                  Submit conversational prompts. The planner will build an execution DAG using your active plugins.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && triggerPlanner()}
-                    placeholder="e.g. Find recent blog updates on example.com or extract data..."
-                    disabled={isRunning}
-                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm placeholder-slate-600 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30 transition-all disabled:opacity-50 text-slate-200"
-                  />
-                  <Button
-                    onClick={triggerPlanner}
-                    disabled={isRunning || !prompt.trim()}
-                    className="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold px-5 rounded-xl flex items-center gap-2 transition-all shadow-lg shadow-cyan-500/10 active:scale-95 disabled:scale-100 disabled:opacity-50"
-                  >
-                    <Send className="h-4 w-4" />
-                    Run Plan
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+            {/* High-Fidelity Input Controller */}
+            <CommandControllerPanel onDispatch={(query) => {
+              setPrompt(query);
+              triggerPlanner(query);
+            }} />
+
 
             {/* Core Interface Status Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -272,21 +251,16 @@ export default function WorkspaceDashboard() {
 
             </div>
 
-            {result && (
-              <Card className="bg-slate-900 border-slate-800 shadow-xl mt-6">
-                <CardHeader className="border-b border-slate-800 pb-4">
-                  <CardTitle className="text-lg font-bold flex items-center gap-2 text-slate-200">
-                    <Database className="h-5 w-5 text-emerald-400" />
-                    Execution Output
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="p-4">
-                  <pre className="text-xs text-slate-300 whitespace-pre-wrap font-mono bg-slate-950 p-4 rounded-xl border border-slate-800/50 max-h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800">
-                    {result}
-                  </pre>
-                </CardContent>
-              </Card>
+            {analyzedResults && analyzedResults.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold text-slate-200 mb-4 flex items-center gap-2 font-mono">
+                  <Database className="h-4 w-4 text-emerald-400" />
+                  Execution Output Analytics
+                </h3>
+                <AnalyticsDisplayGrid results={analyzedResults} />
+              </div>
             )}
+
           </div>
 
           {/* Right Column (Agent Terminal WebSocket Monitor) */}

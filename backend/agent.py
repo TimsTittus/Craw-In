@@ -1,5 +1,6 @@
 import json
 import httpx
+import os
 from typing import List, Dict, Any
 
 class LocalAgentPlanner:
@@ -7,7 +8,8 @@ class LocalAgentPlanner:
     Communicates with a locally‑running Ollama LLM to generate a
     deterministic execution DAG from a free‑form user request.
     """
-    def __init__(self, endpoint: str = "http://localhost:11434"):
+    def __init__(self, endpoint: str = None):
+        endpoint = endpoint or os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434")
         # Re‑use a single AsyncClient for the lifetime of the instance
         self.client = httpx.AsyncClient(base_url=endpoint, timeout=30.0)
 

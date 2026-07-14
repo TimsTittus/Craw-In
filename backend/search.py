@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 from typing import List, Dict, Any
+import os
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -25,7 +26,9 @@ class SearchIndexingFabric:
     (default 384, matching common sentence‑transformer embeddings).
     """
 
-    def __init__(self, host: str = "localhost", port: int = 6333):
+    def __init__(self, host: str = None, port: int = None):
+        host = host or os.getenv("QDRANT_HOST", "localhost")
+        port = port or int(os.getenv("QDRANT_PORT", "6333"))
         self.client = QdrantClient(host=host, port=port)
 
     def initialize_collection(self, collection_name: str, dim: int = 384) -> None:
