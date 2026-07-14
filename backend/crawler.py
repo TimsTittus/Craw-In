@@ -37,12 +37,16 @@ class ConcurrentIngestionEngine:
             }
         """
         async with self.semaphore:
-            async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
-                response = await client.get(url, follow_redirects=True)
-                if response.status_code == 200:
-                    downloaded = response.text
-                    # trafilatura returns ``None`` when it cannot extract text
-                    extracted_text = trafilatura.extract(downloaded) or ""
-                    return {"url": url, "content": extracted_text, "status": 200}
-                # Non‑200 responses – graceful fallback
-                return {"url": url, "content": "", "status": response.status_code}
+            try:
+                async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
+                    response = await client.get(url, follow_redirects=True)
+                    if response.status_code == 200:
+                        downloaded = response.text
+                        # trafilatura returns ``None`` when it cannot extract text
+                        extracted_text = trafilatura.extract(downloaded) or ""
+                        return {"url": url, "content": extracted_text, "status": 200}
+                    # Non‑200 responses – graceful fallback
+                    return {"url": url, "content": "", "status": response.status_code}
+            except httpx.RequestError as e:
+                # Catch DNS failures, connection timeouts, etc.
+                return {"url": url, "content": "", "status": 0}
