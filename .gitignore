@@ -10,7 +10,8 @@ venv/
 env/
 ENV/
 .venv/
-
+__pycache__/
+*.pyc
 # Environment variables
 .env
 .env.*
@@ -48,3 +49,22 @@ htmlcov/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Next.js workspace ignores
+workspace/node_modules/
+workspace/.next/
+workspace/out/
+workspace/.env.local
+workspace/.env.*
+workspace/npm-debug.log*
+workspace/yarn-error.log*
+workspace/bun.lockb
+workspace/bun-debug.log*
+node_modules/
+.next/
+dist/
+build/
+.npm/
+.yarn/
+.pnpm-store/
+.cache/
