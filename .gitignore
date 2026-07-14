@@ -1,19 +1,35 @@
-# Python
+.claude.md
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-.venv/
+*$py.class
+
+# Virtual environments
 venv/
-venv
+env/
+ENV/
+.venv/
 
-# Scrapy
-*.log
-.scrapy/
-
-# Env
+# Environment variables
 .env
+.env.*
 
-# Editor
+# IDEs and Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
-*.txt
+# Logs and databases
+*.log
+*.sqlite3
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
