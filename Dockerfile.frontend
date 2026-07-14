@@ -1,0 +1,21 @@
+# Stage 1 – Build using Bun
+FROM oven/bun:latest AS builder
+WORKDIR /app
+# Copy package files
+COPY workspace/package.json workspace/bun.lock ./
+RUN bun install
+# Copy the rest of the workspace
+COPY workspace/ ./
+# Build the Next.js app
+RUN bun run build
+
+# Stage 2 – Runtime (lightweight Bun)
+FROM oven/bun:latest AS runtime
+WORKDIR /app
+COPY --from=builder /app/package.json /app/bun.lock ./
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/next.config.ts ./
+EXPOSE 3000
+CMD ["bun", "run", "start"]
