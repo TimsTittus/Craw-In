@@ -24,6 +24,21 @@ ENV/
 # Logs and databases
 *.log
 *.sqlite3
+*.db
+pgdata/
+qdrant_storage/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+celeryd.pid
+
+# Testing, Linting and Type Checking
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # OS generated files
 .DS_Store
