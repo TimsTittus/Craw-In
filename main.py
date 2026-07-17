@@ -3,8 +3,18 @@ import asyncio
 import re
 from backend.ingestion import ingest_urls
 from backend.search import get_keyword_engine, KeywordDocument
+from fastapi.middleware.cors import CORSMiddleware
+from backend.api.v1.router import router as api_router
 
 app = FastAPI(title='InfoOS Core')
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(api_router, prefix="/api/v1")
 
 class ConnectionManager:
     """Manage active WebSocket connections for broadcasting task updates."""
@@ -42,10 +52,13 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                 payload = json.loads(data)
                 if payload.get("action") == "run_agent":
                     prompt = payload.get("prompt", "")
+                    llm_config = payload.get("llm_config", {})
+                    provider = llm_config.get("provider", "local_ollama")
+                    model = llm_config.get("model", "qwen2.5:7b")
                     
                     steps = [
-                        {"step": "Analyzing Prompt", "status": "running", "details": f"LocalAgentPlanner is analyzing request: '{prompt}' using qwen2.5:7b..."},
-                        {"step": "Analyzing Prompt", "status": "completed", "details": "Generated deterministic execution DAG for the workspace."},
+                        {"step": "Analyzing Prompt", "status": "running", "details": f"AgentPlanner is analyzing request: '{prompt}' using {provider} ({model})..."},
+                        {"step": "Analyzing Prompt", "status": "completed", "details": f"Generated deterministic execution DAG via {model}."},
                         {"step": "Concurrent Ingestion", "status": "running", "details": "ConcurrentIngestionEngine scraping matching URLs from targets..."},
                         {"step": "Concurrent Ingestion", "status": "completed", "details": "Scraped pages. Extracted structural text via trafilatura."},
                         {"step": "Hybrid Retrieval & Indexing", "status": "running", "details": "Computing FastEmbed dense vectors & storing keyword indices..."},
