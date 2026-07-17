@@ -14,7 +14,8 @@ import {
   AlertCircle,
   CheckCircle,
   Network,
-  Cpu
+  Cpu,
+  X
 } from "lucide-react";
 import { CommandControllerPanel } from "@/components/ui/command-controller";
 import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-display";
@@ -37,6 +38,7 @@ export default function WorkspaceDashboard() {
   const [isRunning, setIsRunning] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LLMConfigState | null>(null);
   const [pingStatus, setPingStatus] = useState<{ status: 'idle' | 'testing' | 'success' | 'error', message: string }>({ status: 'idle', message: '' });
+  const [sidePanelDoc, setSidePanelDoc] = useState<AnalyzedResult | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -313,16 +315,46 @@ export default function WorkspaceDashboard() {
                   <Database className="h-4 w-4 text-emerald-400" />
                   Execution Output Analytics
                 </h3>
-                <AnalyticsDisplayGrid results={analyzedResults} />
+                <AnalyticsDisplayGrid
+                  results={analyzedResults}
+                  onViewDetails={(doc) => setSidePanelDoc(doc)}
+                />
               </div>
             )}
 
             {result && (
               <div className="mt-6">
-                <h3 className="text-sm font-semibold text-slate-200 mb-4 flex items-center gap-2 font-mono">
-                  <Search className="h-4 w-4 text-cyan-400" />
-                  Extracted Details
-                </h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2 font-mono">
+                    <Search className="h-4 w-4 text-cyan-400" />
+                    Extracted Details
+                  </h3>
+                  <Button
+                    onClick={() => {
+                      if (analyzedResults && analyzedResults.length > 0) {
+                        // Find the matching document if possible
+                        const match = analyzedResults[0];
+                        setSidePanelDoc({
+                          ...match,
+                          content: match.content || result
+                        });
+                      } else {
+                        setSidePanelDoc({
+                          id: "preview",
+                          title: "Context Preview",
+                          source: "Crawl Ingestion",
+                          confidence: 1.0,
+                          indicators: ["Direct Stream"],
+                          content: result
+                        });
+                      }
+                    }}
+                    size="sm"
+                    className="h-8 border border-slate-800 bg-slate-900/60 hover:bg-slate-800 text-[10px] text-slate-400 hover:text-white px-3 py-1 font-mono rounded-lg transition-colors flex items-center gap-1.5"
+                  >
+                    View in Side Panel
+                  </Button>
+                </div>
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 text-slate-300 font-mono text-xs whitespace-pre-wrap max-h-[400px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 break-words">
                   {result}
                 </div>
@@ -405,6 +437,58 @@ export default function WorkspaceDashboard() {
         </div>
 
       </div>
+
+      {/* Side Panel slide-over overlay */}
+      {sidePanelDoc && (
+        <>
+          {/* Backdrop overlay */}
+          <div
+            className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-40 transition-opacity duration-300 animate-in fade-in cursor-pointer"
+            onClick={() => setSidePanelDoc(null)}
+          />
+          {/* Slide-over panel */}
+          <div className="fixed inset-y-0 right-0 w-full max-w-2xl bg-slate-900/95 border-l border-slate-800 shadow-2xl z-50 flex flex-col transition-all duration-300 ease-out transform translate-x-0 animate-in slide-in-from-right duration-300">
+            {/* Header */}
+            <div className="p-6 border-b border-slate-850 flex items-center justify-between bg-slate-950/40">
+              <div className="space-y-1.5 flex-1 min-w-0 pr-4">
+                <div className="flex items-center space-x-2.5">
+                  <span className="text-xs bg-slate-800 text-slate-300 font-mono px-2 py-0.5 rounded border border-slate-700/50">
+                    {sidePanelDoc.source}
+                  </span>
+                  <span className="text-xs text-emerald-400 font-mono">
+                    {(sidePanelDoc.confidence * 100).toFixed(0)}% Match
+                  </span>
+                </div>
+                <h2 className="text-sm font-bold text-slate-100 font-mono truncate">
+                  {sidePanelDoc.title}
+                </h2>
+              </div>
+              <button
+                onClick={() => setSidePanelDoc(null)}
+                className="p-2 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg border border-slate-800 transition-colors"
+                title="Close panel"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="flex-1 p-6 overflow-y-auto font-mono text-xs text-slate-300 whitespace-pre-wrap select-text scrollbar-thin scrollbar-thumb-slate-800 break-words leading-relaxed selection:bg-cyan-500/30">
+              {sidePanelDoc.content || "No content extracted."}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-850 bg-slate-950/20 flex justify-end">
+              <Button
+                onClick={() => setSidePanelDoc(null)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-200 border-none px-6"
+              >
+                Close Panel
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
     </main>
   );
 }

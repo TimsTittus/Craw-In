@@ -91,8 +91,36 @@ class OllamaClient(BaseLLMClient):
     async def ping(self) -> str:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                _, actual_model = await self._resolve_endpoint_and_model(client)
-                return actual_model
+                base_url, actual_model = await self._resolve_endpoint_and_model(client)
+                
+                # Verify the model is actually downloaded/available
+                res = await client.get(f"{base_url}/api/tags")
+                res.raise_for_status()
+                available_models = [m.get("name") for m in res.json().get("models", [])]
+                
+                model_exists = any(
+                    m == actual_model or m.startswith(f"{actual_model}:")
+                    for m in available_models
+                )
+                
+                if not model_exists:
+                    raise ValueError(f"Model '{actual_model}' is not downloaded in Ollama. Please run `ollama run {actual_model}` first.")
+                
+                # Check if it's dynamically running in memory right now
+                res_ps = await client.get(f"{base_url}/api/ps")
+                res_ps.raise_for_status()
+                running_models = [m.get("name") for m in res_ps.json().get("models", [])]
+                
+                is_running = any(
+                    m == actual_model or m.startswith(f"{actual_model}:")
+                    for m in running_models
+                )
+                
+                if is_running:
+                    return f"{actual_model} (Active in Memory)"
+                else:
+                    return f"{actual_model} (Standby - Lazy Load)"
+                    
         except httpx.ConnectError:
             raise ValueError(f"Failed to connect to Ollama at {self.base_url}. Ensure Ollama is running and accessible.")
 

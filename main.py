@@ -1,3 +1,11 @@
+import socket
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family == socket.AF_UNSPEC or family == 0:
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _ipv4_only_getaddrinfo
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
 import re
@@ -125,11 +133,9 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                             # Actually run the real ingestion pipeline for the found URL!
                             await ingest_urls([target_url])
                             print(f"[main.py] ingest_urls completed for {target_url}", flush=True)
-                            
                             session = get_keyword_engine()
-                            # Fetch only the document that matches the URL
-                            docs = session.query(KeywordDocument).filter(KeywordDocument.title.like(f"%{target_url}%")).all()
-                            docs_filtered = docs
+                            # Fetch all documents crawled so far in this session
+                            docs_filtered = session.query(KeywordDocument).all()
                             print(f"[main.py] Found {len(docs_filtered)} docs in keyword store", flush=True)
                         else:
                             print(f"[main.py] No URL found in prompt, searching keyword store for '{prompt}'", flush=True)
@@ -159,7 +165,8 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                                 "title": d.title,
                                 "source": "SQLite Indexer",
                                 "confidence": 0.99,
-                                "indicators": [f"Extracted via {getattr(d, 'source', 'trafilatura')}", "Verified DB Record"]
+                                "indicators": [f"Extracted via {getattr(d, 'source', 'trafilatura')}", "Verified DB Record"],
+                                "content": d.content
                             })
                         
                         final_output = "\n\n---\n\n".join(results_text) if results_text else "No documents found in the database matching the requested URL."
@@ -185,3 +192,21 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                 await manager.broadcast(data)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        print(f"[main.py] WebSocket disconnected for task {task_id}. Cleaning up session databases...", flush=True)
+        try:
+            # Clear SQLite keyword database
+            session = get_keyword_engine()
+            session.query(KeywordDocument).delete()
+            session.commit()
+            print("[main.py] Cleared SQLite keyword documents.", flush=True)
+        except Exception as e:
+            print(f"[main.py] Error clearing SQLite keyword documents: {e}", flush=True)
+            
+        try:
+            # Reinitialize (clear) Qdrant collection
+            from backend.search import SearchIndexingFabric
+            fabric = SearchIndexingFabric()
+            fabric.initialize_collection("documents", dim=384, force=True)
+            print("[main.py] Reinitialized Qdrant 'documents' collection.", flush=True)
+        except Exception as e:
+            print(f"[main.py] Error reinitializing Qdrant collection: {e}", flush=True)

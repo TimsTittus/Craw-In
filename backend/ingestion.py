@@ -14,7 +14,7 @@ from typing import List
 import trafilatura
 
 from .crawler import ConcurrentIngestionEngine
-from .search import SearchIndexingFabric, get_keyword_engine, add_keyword_document
+from .search import SearchIndexingFabric, get_keyword_engine, add_keyword_document, KeywordDocument
 from fastembed import TextEmbedding
 from .plugins.playwright_ingestion_plugin import PlaywrightIngestionPlugin
 from .utils.concurrency import limited_playwright_scrape
@@ -36,15 +36,15 @@ async def ingest_urls(urls: List[str], collection_name: str = "documents") -> No
     # Initialise crawl engine and Qdrant client
     crawler = ConcurrentIngestionEngine()
     fabric = SearchIndexingFabric()
-    fabric.initialize_collection(collection_name, dim=384)  # 384 matches FastEmbed output dim
+    fabric.initialize_collection(collection_name, dim=384) 
 
-    # Initialise keyword DB session
     kw_session = get_keyword_engine()
+    
+    existing_count = kw_session.query(KeywordDocument).count()
 
-    for idx, url in enumerate(urls, start=1):
+    for idx, url in enumerate(urls, start=existing_count + 1):
         result = await crawler.process_url(url)
         if result["status"] != 200:
-            # Skip non‑200 responses; you can log or handle as needed
             continue
         text = result.get("content", "") or ""
         source = result.get("source", "unknown")

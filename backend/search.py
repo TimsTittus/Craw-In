@@ -31,7 +31,7 @@ class SearchIndexingFabric:
         port = port or int(os.getenv("QDRANT_PORT", "6333"))
         self.client = QdrantClient(host=host, port=port)
 
-    def initialize_collection(self, collection_name: str, dim: int = 384) -> None:
+    def initialize_collection(self, collection_name: str, dim: int = 384, force: bool = False) -> None:
         """Create or recreate a collection.
 
         Parameters
@@ -40,7 +40,16 @@ class SearchIndexingFabric:
             Name of the collection inside Qdrant.
         dim: int, optional
             Vector dimensionality. Defaults to 384.
+        force: bool, optional
+            If True, recreates the collection even if it already exists, wiping all vectors.
         """
+        if not force:
+            try:
+                self.client.get_collection(collection_name)
+                return
+            except Exception:
+                pass
+
         self.client.recreate_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
