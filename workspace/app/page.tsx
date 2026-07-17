@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { CommandControllerPanel } from "@/components/ui/command-controller";
 import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-display";
+import { LLMConfigPanel, LLMConfigState } from "@/components/llm-config-panel";
 
 interface LogStep {
   step: string;
@@ -34,6 +35,8 @@ export default function WorkspaceDashboard() {
   const [analyzedResults, setAnalyzedResults] = useState<AnalyzedResult[]>([]);
   const [connected, setConnected] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LLMConfigState | null>(null);
+  const [pingStatus, setPingStatus] = useState<{ status: 'idle' | 'testing' | 'success' | 'error', message: string }>({ status: 'idle', message: '' });
   const socketRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -132,10 +135,39 @@ export default function WorkspaceDashboard() {
     const payload = {
       action: "run_agent",
       prompt: queryText,
+      llm_config: llmConfig || { provider: "local_ollama", model: "qwen2.5:7b" }
     };
 
     socketRef.current.send(JSON.stringify(payload));
-    addLocalLog("Dispatcher", "running", `Dispatched planning task: "${queryText}"`);
+    addLocalLog("Dispatcher", "running", `Dispatched planning task: "${queryText}" using ${payload.llm_config.provider} (${payload.llm_config.model})`);
+  };
+
+  const pingBackend = async () => {
+    if (!llmConfig) return;
+    setPingStatus({ status: 'testing', message: 'Pinging backend...' });
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const res = await fetch(`${apiUrl}/api/v1/dispatch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: 'ping',
+          llm_config: llmConfig
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPingStatus({ status: 'success', message: `Success! Active: ${data.config_active}` });
+      } else {
+        let error = await res.text();
+        try { error = JSON.parse(error).detail || error; } catch (e) { }
+        setPingStatus({ status: 'error', message: `Error: ${res.statusText} - ${error}` });
+      }
+    } catch (e: any) {
+      setPingStatus({ status: 'error', message: `Network Error: ${e.message}` });
+    }
   };
 
   return (
@@ -190,6 +222,30 @@ export default function WorkspaceDashboard() {
 
           {/* Left / Center Grid (Controls & Status Panels) */}
           <div className="lg:col-span-2 space-y-8">
+
+            {/* Core Infrastructure Routing */}
+            <div className="space-y-4">
+              <LLMConfigPanel onConfigChange={setLlmConfig} />
+
+              <div className="flex items-center space-x-4">
+                <Button
+                  onClick={pingBackend}
+                  disabled={pingStatus.status === 'testing' || !llmConfig}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white border-none"
+                >
+                  {pingStatus.status === 'testing' ? 'Pinging...' : 'Ping Active Configuration'}
+                </Button>
+
+                {pingStatus.status !== 'idle' && (
+                  <span className={`text-xs font-mono px-3 py-1.5 rounded ${pingStatus.status === 'success' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
+                    pingStatus.status === 'error' ? 'bg-rose-900/50 text-rose-400 border border-rose-800' :
+                      'bg-slate-800 text-slate-300'
+                    }`}>
+                    {pingStatus.message}
+                  </span>
+                )}
+              </div>
+            </div>
 
             {/* High-Fidelity Input Controller */}
             <CommandControllerPanel onDispatch={(query) => {
