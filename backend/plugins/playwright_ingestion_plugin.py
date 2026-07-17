@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright  # type: ignore
 
 class PlaywrightIngestionPlugin:
     """Fallback scraper that renders JavaScript with Playwright.
@@ -16,10 +16,14 @@ class PlaywrightIngestionPlugin:
                 context = await browser.new_context()
                 page = await context.new_page()
                 await page.goto(url, wait_until="networkidle", timeout=self.timeout * 1000)
-                # Extract full visible text of the page
-                content = await page.evaluate("() => document.body.innerText")
+                # Extract full visible text of the page as HTML and convert to Markdown
+                content_html = await page.evaluate("() => document.body.innerHTML")
                 await browser.close()
-                return content.strip() if content else ""
+                
+                if content_html:
+                    import markdownify  # type: ignore
+                    return markdownify.markdownify(content_html, heading_style="ATX").strip()
+                return ""
         except Exception as e:
             # If the browser executable is missing, attempt to install browsers automatically
             import subprocess, sys, os

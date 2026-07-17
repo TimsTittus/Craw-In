@@ -48,21 +48,31 @@ class ConcurrentIngestionEngine:
                     response = await client.get(url, follow_redirects=True)
                     if response.status_code == 200:
                         downloaded = response.text
-                        # trafilatura returns ``None`` when it cannot extract text
-                        extracted_text = trafilatura.extract(downloaded)
+                        extracted_text = trafilatura.extract(
+                            downloaded,
+                            output_format="markdown",
+                            include_links=True,
+                            include_formatting=True
+                        )
                         source = "trafilatura"
-                        if not extracted_text:
-                            print(f"[Craw-In Engine] trafilatura extracted 0 bytes for {url}. Switching to Playwright fallback...", flush=True)
-                            logger.info(f"Trafilatura returned empty text for {url}. Invoking Playwright fallback...")
-                            # Fallback to Playwright rendering for JS-heavy pages
+                        
+                        if extracted_text and len(extracted_text) < 800:
+                            import markdownify  # type: ignore
+                            full_md = markdownify.markdownify(downloaded, heading_style="ATX").strip()
+                            if len(full_md) > len(extracted_text) * 1.5:
+                                extracted_text = full_md
+                                source = "markdownify"
+                                print(f"[Craw-In Engine] trafilatura output too short ({len(full_md)} chars). Switched to raw markdownify.", flush=True)
+
+                        if not extracted_text or len(extracted_text) < 200:
+                            print(f"[Craw-In Engine] Content too short ({len(extracted_text) if extracted_text else 0} chars). Switching to Playwright fallback for {url}...", flush=True)
+                            logger.info(f"Content too short for {url}. Invoking Playwright fallback...")
                             playwright_plugin = PlaywrightIngestionPlugin(timeout=PLAYWRIGHT_TIMEOUT)
                             extracted_text = await limited_playwright_scrape(playwright_plugin, url) or ""
                             source = "playwright"
                             print(f"[Craw-In Engine] Playwright fallback completed for {url}. Extracted {len(extracted_text)} bytes.", flush=True)
                             logger.info(f"Playwright fallback completed for {url}. Extracted {len(extracted_text)} characters.")
-                        else:
-                            print(f"[Craw-In Engine] trafilatura successfully extracted {len(extracted_text)} bytes for {url}.", flush=True)
-                            logger.info(f"Trafilatura successfully extracted {len(extracted_text)} characters for {url}.")
+                            
                         return {"url": url, "content": extracted_text, "status": 200, "source": source}
                     # Non‑200 responses – graceful fallback
                     return {"url": url, "content": "", "status": response.status_code, "source": "none"}
