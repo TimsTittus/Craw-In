@@ -13,6 +13,10 @@ from backend.ingestion import ingest_urls
 from backend.search import get_keyword_engine, KeywordDocument
 from fastapi.middleware.cors import CORSMiddleware
 from backend.api.v1.router import router as api_router
+from backend.plugins import load_plugins
+
+# Load plugins once at startup to enable connection pooling & shared caching
+plugins_map = load_plugins("backend/plugins")
 
 app = FastAPI(title='InfoOS Core')
 app.add_middleware(
@@ -138,19 +142,78 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                             docs_filtered = session.query(KeywordDocument).all()
                             print(f"[main.py] Found {len(docs_filtered)} docs in keyword store", flush=True)
                         else:
-                            print(f"[main.py] No URL found in prompt, searching keyword store for '{prompt}'", flush=True)
-                            session = get_keyword_engine()
-                            docs_filtered = session.query(KeywordDocument).filter(
-                                KeywordDocument.content.like(f"%{prompt}%") | 
-                                KeywordDocument.title.like(f"%{prompt}%")
-                            ).all()
+                            print(f"[main.py] No URL found in prompt. Activating search_api plugin for '{prompt}'...", flush=True)
+                            if "search_api" in plugins_map and "instance" in plugins_map["search_api"]:
+                                search_plugin = plugins_map["search_api"]["instance"]
+                                print(f"[main.py] Found search_api plugin, executing query...", flush=True)
+                                
+                                # Broadcast that we are starting Web Search
+                                import datetime
+                                current_steps.append({
+                                    "step": "Web Search (Jina AI)",
+                                    "status": "running",
+                                    "details": f"Searching the live web for '{prompt}'...",
+                                    "timestamp": datetime.datetime.now().strftime("%H:%M:%S")
+                                })
+                                await manager.broadcast(json.dumps({
+                                    "type": "telemetry",
+                                    "status": "running",
+                                    "steps": current_steps
+                                }))
+                                
+                                search_results = await search_plugin.execute(prompt)
+                                print(f"[main.py] search_api returned {len(search_results)} results", flush=True)
+                                
+                                if search_results and "error" not in search_results[0]:
+                                    urls_found = [res["url"] for res in search_results if res.get("url")]
+                                    urls_to_ingest = urls_found[:3]
+                                    
+                                    current_steps[-1]["status"] = "completed"
+                                    current_steps[-1]["details"] = f"Found {len(urls_to_ingest)} search URLs to ingest."
+                                    
+                                    # Update UI telemetry for ingestion
+                                    current_steps.append({
+                                        "step": "Ingestion Pipeline",
+                                        "status": "running",
+                                        "details": f"Fetching and extracting content from {len(urls_to_ingest)} search result pages...",
+                                        "timestamp": datetime.datetime.now().strftime("%H:%M:%S")
+                                    })
+                                    await manager.broadcast(json.dumps({
+                                        "type": "telemetry",
+                                        "status": "running",
+                                        "steps": current_steps
+                                    }))
+                                    
+                                    await ingest_urls(urls_to_ingest)
+                                    session = get_keyword_engine()
+                                    docs_filtered = session.query(KeywordDocument).all()
+                                else:
+                                    error_msg = search_results[0].get("error", "No results found") if search_results else "No results found"
+                                    current_steps[-1]["status"] = "failed"
+                                    current_steps[-1]["details"] = f"Web Search failed: {error_msg}"
+                                    await manager.broadcast(json.dumps({
+                                        "type": "telemetry",
+                                        "status": "running",
+                                        "steps": current_steps
+                                    }))
+                                    session = get_keyword_engine()
+                                    docs_filtered = session.query(KeywordDocument).all()
+                            else:
+                                print(f"[main.py] search_api plugin not found or failed to load. Falling back to keyword search.", flush=True)
+                                session = get_keyword_engine()
+                                docs_filtered = session.query(KeywordDocument).filter(
+                                    KeywordDocument.content.like(f"%{prompt}%") | 
+                                    KeywordDocument.title.like(f"%{prompt}%")
+                                ).all()
 
-                        # Update telemetry to completed
-                        current_steps[-1]["status"] = "completed"
-                        current_steps[-1]["details"] = f"Processed request. Found {len(docs_filtered)} documents."
+                        # Update telemetry status
+                        has_failed = any(s["status"] == "failed" for s in current_steps)
+                        if not has_failed:
+                            current_steps[-1]["status"] = "completed"
+                            current_steps[-1]["details"] = f"Processed request. Found {len(docs_filtered)} documents."
                         await manager.broadcast(json.dumps({
                             "type": "telemetry",
-                            "status": "completed",
+                            "status": "failed" if has_failed else "completed",
                             "steps": current_steps
                         }))
 

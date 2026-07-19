@@ -44,6 +44,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
       - OLLAMA_ENDPOINT=http://host.docker.internal:11434
+      - JINA_API_KEY
     depends_on:
       - postgres
       - redis
