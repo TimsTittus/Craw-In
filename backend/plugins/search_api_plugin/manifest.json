@@ -1,0 +1,8 @@
+{
+  "name": "search_api",
+  "description": "Searches the live web and returns LLM-friendly SERP markdown and URLs.",
+  "version": "1.0",
+  "required_keys": [
+    "query"
+  ]
+}
