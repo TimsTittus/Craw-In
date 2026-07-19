@@ -15,7 +15,8 @@ import {
   CheckCircle,
   Network,
   Cpu,
-  X
+  X,
+  ArrowUpRight
 } from "lucide-react";
 import { CommandControllerPanel } from "@/components/ui/command-controller";
 import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-display";
@@ -355,8 +356,8 @@ export default function WorkspaceDashboard() {
                     View in Side Panel
                   </Button>
                 </div>
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 text-slate-300 font-mono text-xs whitespace-pre-wrap max-h-[400px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 break-words">
-                  {result}
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 max-h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-850 break-words">
+                  <BeautifulMarkdown text={result} />
                 </div>
               </div>
             )}
@@ -473,8 +474,8 @@ export default function WorkspaceDashboard() {
             </div>
 
             {/* Scrollable Content */}
-            <div className="flex-1 p-6 overflow-y-auto font-mono text-xs text-slate-300 whitespace-pre-wrap select-text scrollbar-thin scrollbar-thumb-slate-800 break-words leading-relaxed selection:bg-cyan-500/30">
-              {sidePanelDoc.content || "No content extracted."}
+            <div className="flex-1 p-6 overflow-y-auto select-text scrollbar-thin scrollbar-thumb-slate-850 break-words selection:bg-cyan-500/30">
+              <BeautifulMarkdown text={sidePanelDoc.content || ""} />
             </div>
 
             {/* Footer */}
@@ -491,4 +492,136 @@ export default function WorkspaceDashboard() {
       )}
     </main>
   );
+}
+
+function BeautifulMarkdown({ text }: { text: string }) {
+  if (!text) return <p className="text-slate-500 italic">No content extracted.</p>;
+
+  // Clean standard reasoning line if present
+  const cleanedText = text.replace(/^✅ Reasoning complete\..*?\n\n/i, "");
+  const lines = cleanedText.split("\n");
+
+  return (
+    <div className="space-y-3.5 text-slate-300 font-sans text-sm leading-relaxed">
+      {lines.map((line, lineIdx) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={lineIdx} className="h-2" />;
+
+        // Horizontal Rule
+        if (trimmed === "---" || trimmed.match(/^[-*_]{3,}$/)) {
+          return <hr key={lineIdx} className="border-slate-800/80 my-4" />;
+        }
+
+        // Headers
+        if (trimmed.startsWith("# ")) {
+          return (
+            <h1 key={lineIdx} className="text-lg font-bold text-slate-100 border-b border-slate-800/60 pb-2 mt-5 mb-2 flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded bg-cyan-400 shrink-0" />
+              {parseInlineMarkdown(trimmed.slice(2))}
+            </h1>
+          );
+        }
+        if (trimmed.startsWith("## ")) {
+          return (
+            <h2 key={lineIdx} className="text-md font-semibold text-slate-200 mt-4 mb-2 flex items-center gap-2">
+              <span className="h-1 w-1 rounded-sm bg-cyan-400/80 shrink-0" />
+              {parseInlineMarkdown(trimmed.slice(3))}
+            </h2>
+          );
+        }
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h3 key={lineIdx} className="text-sm font-semibold text-slate-300 mt-3 mb-1">
+              {parseInlineMarkdown(trimmed.slice(4))}
+            </h3>
+          );
+        }
+
+        // List items
+        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+          return (
+            <div key={lineIdx} className="flex items-start space-x-2 pl-1.5 my-1.5">
+              <span className="text-cyan-400/90 mt-1.5 shrink-0 select-none text-[6px]">■</span>
+              <span className="flex-1 text-slate-300/90">{parseInlineMarkdown(trimmed.slice(2))}</span>
+            </div>
+          );
+        }
+
+        // Default Paragraph
+        return (
+          <p key={lineIdx} className="text-slate-300 my-1 hover:text-slate-200 transition-colors duration-150">
+            {parseInlineMarkdown(line)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseInlineMarkdown(text: string): React.ReactNode[] {
+  const linkRegex = /\[(.*?)\]\((.*?)\)/g;
+  let tokens: Array<{ type: 'text' | 'link'; content: string; url?: string }> = [];
+
+  let match;
+  let currentPos = 0;
+  linkRegex.lastIndex = 0;
+
+  while ((match = linkRegex.exec(text)) !== null) {
+    if (match.index > currentPos) {
+      tokens.push({ type: 'text', content: text.slice(currentPos, match.index) });
+    }
+    tokens.push({ type: 'link', content: match[1], url: match[2] });
+    currentPos = linkRegex.lastIndex;
+  }
+  if (currentPos < text.length) {
+    tokens.push({ type: 'text', content: text.slice(currentPos) });
+  }
+
+  if (tokens.length === 0) {
+    tokens.push({ type: 'text', content: text });
+  }
+
+  const finalTokens: Array<React.ReactNode> = [];
+  let keyCounter = 0;
+
+  for (const token of tokens) {
+    if (token.type === 'link') {
+      const isOutbound = token.url?.startsWith('http') || token.url?.startsWith('//');
+      let finalUrl = token.url || '';
+      if (!isOutbound && finalUrl.startsWith('/')) {
+        finalUrl = `https://in.indeed.com${finalUrl}`;
+      }
+      finalTokens.push(
+        <a
+          key={keyCounter++}
+          href={finalUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 text-cyan-400 hover:text-cyan-300 font-semibold underline underline-offset-2 transition-colors decoration-cyan-500/40 hover:decoration-cyan-400"
+        >
+          {token.content}
+          <ArrowUpRight className="w-3.5 h-3.5 inline shrink-0 opacity-80" />
+        </a>
+      );
+    } else {
+      // Split by bold markers
+      const textParts = token.content.split(/\*\*/);
+      for (let i = 0; i < textParts.length; i++) {
+        if (i % 2 === 1) {
+          finalTokens.push(
+            <strong key={keyCounter++} className="font-semibold text-cyan-300 bg-slate-900 px-1 py-0.5 rounded border border-slate-800/80 text-xs">
+              {textParts[i]}
+            </strong>
+          );
+        } else {
+          if (textParts[i]) {
+            // Keep normal text inside a span
+            finalTokens.push(<span key={keyCounter++}>{textParts[i]}</span>);
+          }
+        }
+      }
+    }
+  }
+
+  return finalTokens;
 }
