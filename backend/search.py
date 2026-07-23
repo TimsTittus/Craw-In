@@ -105,12 +105,17 @@ class KeywordDocument(Base):
 def get_keyword_engine(db_url: str = None) -> Session:
     """Create a SQLAlchemy session bound to the lightweight keyword store.
 
-    The SQLite file is placed at an absolute path ``/app/keyword_store.db`` which
-    is guaranteed to be writable inside the Docker container. If ``db_url`` is
-    provided it overrides the default.
+    Uses environment variable KEYWORD_DB_PATH or falls back gracefully to a
+    writable local path if ``/app`` does not exist.
     """
     if not db_url:
-        db_url = "sqlite:////app/keyword_store.db"
+        env_path = os.getenv("KEYWORD_DB_PATH")
+        if env_path:
+            db_url = f"sqlite:///{os.path.abspath(env_path)}"
+        elif os.path.exists("/app") and os.access("/app", os.W_OK):
+            db_url = "sqlite:////app/keyword_store.db"
+        else:
+            db_url = f"sqlite:///{os.path.abspath('keyword_store.db')}"
     engine = create_engine(db_url, echo=False, future=True)
     Base.metadata.create_all(engine)
     return Session(engine)

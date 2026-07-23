@@ -1,0 +1,15 @@
+{
+  "name": "person_recon",
+  "description": "Performs targeted OSINT footprinting, multi-platform profile identification, and entity disambiguation for specific individuals using anchor-weighted confidence scoring.",
+  "version": "1.0.0",
+  "capabilities": [
+    "linkedin_search",
+    "github_search",
+    "twitter_search",
+    "news_search",
+    "anchor_disambiguation"
+  ],
+  "required_keys": [
+    "name"
+  ]
+}
