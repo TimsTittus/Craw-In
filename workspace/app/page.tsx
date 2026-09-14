@@ -5,11 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import {
   Terminal,
-  Activity,
   Database,
   Search,
-  Send,
-  Globe,
   RefreshCw,
   AlertCircle,
   CheckCircle,
@@ -21,6 +18,9 @@ import {
 import { CommandControllerPanel } from "@/components/ui/command-controller";
 import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-display";
 import { LLMConfigPanel, LLMConfigState } from "@/components/llm-config-panel";
+import { JobSearchPanel } from "@/components/job-search-panel";
+import { JobResults } from "@/components/job-results";
+import { jobToAnalyzedResult, toJobOutcome, type JobSearchFilters, type JobSearchOutcome } from "@/lib/job-search";
 
 interface LogStep {
   step: string;
@@ -40,8 +40,21 @@ export default function WorkspaceDashboard() {
   const [llmConfig, setLlmConfig] = useState<LLMConfigState | null>(null);
   const [pingStatus, setPingStatus] = useState<{ status: 'idle' | 'testing' | 'success' | 'error', message: string }>({ status: 'idle', message: '' });
   const [sidePanelDoc, setSidePanelDoc] = useState<AnalyzedResult | null>(null);
+  const [jobOutcome, setJobOutcome] = useState<JobSearchOutcome>({ status: "idle" });
   const socketRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
+
+  const addLocalLog = (step: string, status: LogStep["status"], details: string) => {
+    setLogs((prev) => [
+      ...prev,
+      {
+        step,
+        status,
+        details,
+        timestamp: new Date().toLocaleTimeString(),
+      },
+    ]);
+  };
 
   // Initialize WebSocket connection
   const connectWebSocket = () => {
@@ -71,6 +84,8 @@ export default function WorkspaceDashboard() {
           if (data.status === "completed" || data.status === "failed") {
             setIsRunning(false);
           }
+        } else if (data.type === "result" && data.job_search !== undefined) {
+          setJobOutcome(toJobOutcome(data.job_search));
         } else if (data.type === "result") {
           setResult(data.content);
           if (data.results_json) {
@@ -80,7 +95,7 @@ export default function WorkspaceDashboard() {
           // Fallback if raw text or other payload format is sent
           addLocalLog(data.step || "Update", data.status || "completed", data.details || event.data);
         }
-      } catch (err) {
+      } catch {
         addLocalLog("Raw Stream", "completed", event.data);
       }
     };
@@ -89,6 +104,9 @@ export default function WorkspaceDashboard() {
       if (socketRef.current !== ws) return;
       setConnected(false);
       setIsRunning(false);
+      setJobOutcome((prev) =>
+        prev.status === "loading" ? { status: "error", message: "Connection closed before job results arrived." } : prev
+      );
       addLocalLog("System", "failed", "WebSocket connection closed.");
     };
 
@@ -106,6 +124,8 @@ export default function WorkspaceDashboard() {
         socketRef.current.close();
       }
     };
+    // Reconnect only when the task id changes; connectWebSocket is recreated every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
   useEffect(() => {
@@ -113,18 +133,6 @@ export default function WorkspaceDashboard() {
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs]);
-
-  const addLocalLog = (step: string, status: LogStep["status"], details: string) => {
-    setLogs((prev) => [
-      ...prev,
-      {
-        step,
-        status,
-        details,
-        timestamp: new Date().toLocaleTimeString(),
-      },
-    ]);
-  };
 
   const triggerPlanner = (queryText: string = prompt) => {
     if (!queryText.trim()) return;
@@ -137,6 +145,7 @@ export default function WorkspaceDashboard() {
     setLogs([]); // Reset logs for the new run
     setResult(null);
     setAnalyzedResults([]);
+    setJobOutcome({ status: "idle" });
 
     // Send command payload over the WebSocket link
     const payload = {
@@ -147,6 +156,29 @@ export default function WorkspaceDashboard() {
 
     socketRef.current.send(JSON.stringify(payload));
     addLocalLog("Dispatcher", "running", `Dispatched planning task: "${queryText}" using ${payload.llm_config.provider} (${payload.llm_config.model})`);
+  };
+
+  const triggerJobSearch = (queryText: string, filters: JobSearchFilters) => {
+    if (!connected || !socketRef.current) {
+      addLocalLog("System", "failed", "Cannot run job search: WebSocket not connected.");
+      return;
+    }
+
+    setIsRunning(true);
+    setLogs([]);
+    setResult(null);
+    setAnalyzedResults([]);
+    setJobOutcome({ status: "loading" });
+
+    const payload = {
+      action: "run_job_search",
+      prompt: queryText,
+      filters,
+      llm_config: llmConfig || { provider: "local_ollama", model: "qwen2.5:7b" }
+    };
+
+    socketRef.current.send(JSON.stringify(payload));
+    addLocalLog("Dispatcher", "running", `Dispatched job search: "${queryText || filters.role}"`);
   };
 
   const pingBackend = async () => {
@@ -169,11 +201,11 @@ export default function WorkspaceDashboard() {
         setPingStatus({ status: 'success', message: `Success! Active: ${data.config_active}` });
       } else {
         let error = await res.text();
-        try { error = JSON.parse(error).detail || error; } catch (e) { }
+        try { error = JSON.parse(error).detail || error; } catch { }
         setPingStatus({ status: 'error', message: `Error: ${res.statusText} - ${error}` });
       }
-    } catch (e: any) {
-      setPingStatus({ status: 'error', message: `Network Error: ${e.message}` });
+    } catch (e) {
+      setPingStatus({ status: 'error', message: `Network Error: ${e instanceof Error ? e.message : String(e)}` });
     }
   };
 
@@ -259,6 +291,10 @@ export default function WorkspaceDashboard() {
               setPrompt(query);
               triggerPlanner(query);
             }} />
+
+            <JobSearchPanel onSearch={triggerJobSearch} disabled={isRunning || !connected} />
+
+            <JobResults outcome={jobOutcome} onViewDetails={(job) => setSidePanelDoc(jobToAnalyzedResult(job))} />
 
 
             {/* Core Interface Status Grid */}
@@ -395,7 +431,7 @@ export default function WorkspaceDashboard() {
                 {logs.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-slate-600 gap-2">
                     <Terminal className="h-8 w-8 opacity-20" />
-                    <p className="text-center text-[10px]">No active telemetry stream.<br />Enter a prompt and click "Run Plan".</p>
+                    <p className="text-center text-[10px]">No active telemetry stream.<br />Enter a prompt and click &quot;Run Plan&quot;.</p>
                   </div>
                 ) : (
                   logs.map((log, index) => {
@@ -564,7 +600,7 @@ function BeautifulMarkdown({ text }: { text: string }) {
 
 function parseInlineMarkdown(text: string): React.ReactNode[] {
   const linkRegex = /\[(.*?)\]\((.*?)\)/g;
-  let tokens: Array<{ type: 'text' | 'link'; content: string; url?: string }> = [];
+  const tokens: Array<{ type: 'text' | 'link'; content: string; url?: string }> = [];
 
   let match;
   let currentPos = 0;
@@ -594,6 +630,11 @@ function parseInlineMarkdown(text: string): React.ReactNode[] {
       let finalUrl = token.url || '';
       if (!isOutbound && finalUrl.startsWith('/')) {
         finalUrl = `https://in.indeed.com${finalUrl}`;
+      }
+      if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.startsWith('//')) {
+        // Only web links are clickable; javascript:, data: and other schemes from crawled text render as plain text.
+        finalTokens.push(<span key={keyCounter++}>{token.content}</span>);
+        continue;
       }
       finalTokens.push(
         <a

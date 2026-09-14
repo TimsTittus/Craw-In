@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, ShieldCheck, ArrowUpRight } from 'lucide-react';
+import { ShieldCheck, ArrowUpRight } from 'lucide-react';
 
 export interface AnalyzedResult {
   id: string;

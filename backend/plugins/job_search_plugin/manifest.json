@@ -1,0 +1,16 @@
+{
+  "name": "job_search",
+  "description": "Turns natural-language job requirements into a search matrix, deep-crawls the strongest candidates, and returns deduplicated, ranked job postings with the best available application links.",
+  "version": "1.0.0",
+  "capabilities": [
+    "job_query_parsing",
+    "job_search_matrix",
+    "job_extraction",
+    "job_deduplication",
+    "job_ranking",
+    "application_link_verification"
+  ],
+  "required_keys": [
+    "query"
+  ]
+}

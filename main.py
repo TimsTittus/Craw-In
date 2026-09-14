@@ -211,6 +211,73 @@ def _latest_docs_for_urls(urls: list[str]) -> list:
         latest.setdefault(row.title, row)
     return [latest[u] for u in dict.fromkeys(urls) if u in latest]
 
+_JOB_SEARCH_MARKDOWN_TOP_N = 10
+
+
+def _format_job_search_markdown(report: dict) -> str:
+    """Compact Markdown rendering of a job search report for clients that don't render job cards."""
+    if report.get("error"):
+        return f"⚠️ Job search failed: {report['error']}"
+    jobs = report.get("jobs", [])
+    summary = report.get("summary", {})
+    lines = [
+        "# 💼 Job Search Results",
+        f"**{len(jobs)} ranked jobs** from {summary.get('discovered', 0)} search results "
+        f"({summary.get('crawled', 0)} pages crawled).\n",
+    ]
+    for idx, job in enumerate(jobs[:_JOB_SEARCH_MARKDOWN_TOP_N], 1):
+        company = job.get("company") or "Company not stated"
+        where = ", ".join(job.get("locations") or []) or job.get("remote") or "Location not stated"
+        link = job.get("application_url") or job.get("source_url")
+        lines.append(f"### {idx}. [{job.get('title')}]({link}) — {company}\n"
+                     f"- **Match:** `{job.get('match_score', 0)}%` · {where}\n")
+    return "\n".join(lines)
+
+
+async def _run_job_search(payload: dict, task_id: str) -> None:
+    """Run the job_search plugin, streaming its progress with the standard telemetry schema."""
+    import datetime
+    import json
+
+    steps: list[dict] = []
+
+    async def emit(event: str, step: str, status: str, details: str) -> None:
+        entry = {"step": step, "status": status, "details": details, "event": event,
+                 "timestamp": datetime.datetime.now().strftime("%H:%M:%S")}
+        existing = next((s for s in steps if s["step"] == step), None)
+        if existing:
+            existing.update(entry)
+        else:
+            steps.append(entry)
+        overall = {"job_search_failed": "failed", "job_search_completed": "completed"}.get(event, "running")
+        await manager.broadcast(json.dumps({"type": "telemetry", "status": overall, "steps": steps}), task_id)
+
+    job_plugin = plugins_map.get("job_search", {}).get("instance")
+    if job_plugin is None:
+        report = {"error": "Job search plugin is not available."}
+        await emit("job_search_failed", "Job Search", "failed", report["error"])
+    else:
+        context = {
+            "search": plugins_map.get("search_api", {}).get("instance"),
+            "llm_config": payload.get("llm_config") or None,
+            "filters": payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
+            "emit": emit,
+        }
+        try:
+            report = (await job_plugin.execute(str(payload.get("prompt", "")), context))[0]
+        except Exception as e:
+            import traceback
+            print(f"[main.py] ERROR executing job search: {e}\n{traceback.format_exc()}", flush=True)
+            report = {"error": "Job search failed unexpectedly. See server logs for details."}
+            await emit("job_search_failed", "Job Search", "failed", report["error"])
+
+    await manager.broadcast(json.dumps({
+        "type": "result",
+        "content": _format_job_search_markdown(report),
+        "job_search": report,
+    }), task_id)
+
+
 @app.websocket("/ws/tasks/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
     """WebSocket endpoint for streaming task state updates and plugin execution."""
@@ -390,6 +457,8 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                             "type": "result",
                             "content": f"⚠️ Error during execution: {str(e)}"
                         }), task_id)
+                elif payload.get("action") == "run_job_search":
+                    await _run_job_search(payload, task_id)
                 else:
                     await manager.broadcast(data, task_id)
             except Exception:

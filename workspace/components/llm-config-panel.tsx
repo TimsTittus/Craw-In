@@ -16,7 +16,7 @@ export function LLMConfigPanel({ onConfigChange }: { onConfigChange: (config: LL
 
   useEffect(() => {
     onConfigChange({ provider, model, api_key: apiKey, base_url: baseUrl });
-  }, [provider, model, apiKey, baseUrl]);
+  }, [provider, model, apiKey, baseUrl, onConfigChange]);
 
   return (
     <div className="w-full bg-slate-950 border border-slate-800 rounded-xl p-5 font-mono shadow-xl text-slate-200">
