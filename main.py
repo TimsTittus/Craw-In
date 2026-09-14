@@ -81,6 +81,12 @@ manager = ConnectionManager()
 def _parse_person_recon_prompt(prompt: str) -> tuple[str, dict]:
     """Extract person name and context anchors (location, company, role) from natural language prompts."""
     p = prompt.strip()
+    # Drop trailing instruction clauses (e.g. "X, find all the possible details, ASAP") so they don't pollute the name
+    p = re.sub(
+        r'\s*[,;\n]\s*(?:please|pls|asap|urgent(?:ly)?|quick(?:ly)?|find|get|give|show|list|tell|search|look|fetch|collect|gather|all|every|any|details?|info(?:rmation)?|and\s+(?:find|get|give|show|list|tell))\b.*$',
+        '', p, flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    p = re.sub(r'[\s,;.!?]+(?:asap|please|pls|urgently|quickly)?[\s,;.!?]*$', '', p, flags=re.IGNORECASE).strip()
     clean = re.sub(r'^(find|search|lookup|who is|recon|get info on|locate|where is)\s+', '', p, flags=re.IGNORECASE).strip()
     clean = re.sub(r'\s+who\s+is\s+', ' ', clean, flags=re.IGNORECASE).strip()
     
@@ -109,6 +115,70 @@ def _parse_person_recon_prompt(prompt: str) -> tuple[str, dict]:
             
     name = re.sub(r'\s+(who\s+is|is|wokring|working)+$', '', name, flags=re.IGNORECASE).strip()
     return name, context
+
+_PERSON_PARSE_SYSTEM_PROMPT = """You route a search request and extract its parameters.
+Return ONLY a JSON object with these keys:
+  "intent": "person" if the user wants information about a specific individual person, otherwise "web"
+            (news, events, topics, places, companies, products, how-to questions, etc.),
+  "name": for intent "person", the person's full name exactly as written by the user (no instructions, no filler words); otherwise null,
+  "company": employer/organisation or null,
+  "location": city/state/country or null,
+  "role": job title or null,
+  "college": school/university or null,
+  "username": social handle without "@" or null.
+Never invent values that are not in the request. Use null when unknown.
+Examples:
+"Siva Gireesh, find all the possible details, ASAP" -> {"intent": "person", "name": "Siva Gireesh", "company": null, "location": null, "role": null, "college": null, "username": null}
+"who is Vandana working at Algomox in Chennai" -> {"intent": "person", "name": "Vandana", "company": "Algomox", "location": "Chennai", "role": null, "college": null, "username": null}
+"latest news on Kerala floods" -> {"intent": "web", "name": null, "company": null, "location": null, "role": null, "college": null, "username": null}
+"find cybersecurity jobs in Bangalore" -> {"intent": "web", "name": null, "company": null, "location": null, "role": null, "college": null, "username": null}"""
+
+_PERSON_ANCHOR_KEYS = ("company", "location", "role", "college", "username")
+_LLM_PARSE_TIMEOUT_S = 15.0
+
+
+async def _llm_parse_person_prompt(prompt: str, llm_config: dict) -> dict | None:
+    """Use the user's configured LLM to classify the request and extract the target name and anchors.
+
+    Returns {"intent": "web"} for non-person requests, or {"intent": "person", "name": ..., "anchors": {...}}.
+    Returns None on any failure (no LLM, timeout, bad JSON, hallucinated values) so the caller
+    can fall back to keyword routing and the regex parser.
+    """
+    import json
+    from backend.core.llm import LLMConfig, get_llm_client
+
+    try:
+        config = LLMConfig.model_validate({**llm_config, "temperature": 0.0})
+        client = get_llm_client(config)
+        raw = await asyncio.wait_for(
+            client.generate(_PERSON_PARSE_SYSTEM_PROMPT, prompt, response_format="json"),
+            timeout=_LLM_PARSE_TIMEOUT_S,
+        )
+        data = json.loads(raw)
+    except Exception as exc:
+        print(f"[main.py] LLM prompt parsing unavailable ({type(exc).__name__}: {exc}); using regex parser", flush=True)
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    intent = str(data.get("intent", "")).strip().lower()
+    if intent == "web":
+        return {"intent": "web"}
+    if intent != "person":
+        return None
+    prompt_lower = prompt.lower()
+    name = data.get("name")
+    # Grounding: the name must literally appear in the prompt, so the LLM can't invent a target
+    if not isinstance(name, str) or not name.strip() or name.strip().lower() not in prompt_lower:
+        return None
+
+    anchors = {}
+    for key in _PERSON_ANCHOR_KEYS:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip() and val.strip().lstrip("@").lower() in prompt_lower:
+            anchors[key] = val.strip().lstrip("@")
+    return {"intent": "person", "name": name.strip(), "anchors": anchors}
+
 
 def _clean_detected_url(url: str) -> str:
     """Strip trailing punctuation picked up from prose (e.g. 'see https://x.com.')."""
@@ -162,17 +232,29 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     target_url = _clean_detected_url(http_match.group(0)) if http_match else None
                     
                     # Determine execution path: (1) Direct URL (2) Person Recon Plugin (3) Search API / DB
-                    prompt_lower = prompt.lower()
                     has_recon = "instance" in plugins_map.get("person_recon", {})
-                    has_person_kw = any(
-                        kw in prompt_lower for kw in ["find", "who is", "recon", "working", "employee", "profile", "whereabouts", "person"]
-                    ) or re.search(r"\b(?:at|in)\b", prompt_lower) is not None
-                    is_person_query = not target_url and has_recon and (has_person_kw or len(prompt.split()) <= 4)
-                    
+                    # LLM decides person-vs-web intent; keyword heuristic is the fallback when the LLM is unavailable
+                    llm_analysis = await _llm_parse_person_prompt(prompt, llm_config) if (not target_url and has_recon) else None
+                    if llm_analysis:
+                        is_person_query = llm_analysis["intent"] == "person"
+                    else:
+                        prompt_lower = prompt.lower()
+                        has_person_kw = any(
+                            kw in prompt_lower for kw in ["find", "who is", "recon", "working", "employee", "profile", "whereabouts", "person"]
+                        ) or re.search(r"\b(?:at|in)\b", prompt_lower) is not None
+                        is_person_query = not target_url and has_recon and (has_person_kw or len(prompt.split()) <= 4)
+                    print(f"[main.py] Routing: {'person_recon' if is_person_query else 'url' if target_url else 'web'} "
+                          f"(decided by {'LLM' if llm_analysis else 'keyword heuristic'})", flush=True)
+
+                    target_name, anchors = "", {}
                     if is_person_query:
-                        target_name, anchors = _parse_person_recon_prompt(prompt)
+                        if llm_analysis:
+                            target_name, anchors = llm_analysis["name"], llm_analysis["anchors"]
+                        else:
+                            target_name, anchors = _parse_person_recon_prompt(prompt)
+                        parser_used = f"{provider} ({model})" if llm_analysis else "rule-based parser"
                         steps = [
-                            {"step": "Analyzing Prompt", "status": "completed", "details": f"Parsed Target Name: '{target_name}', Context Anchors: {anchors}"},
+                            {"step": "Analyzing Prompt", "status": "completed", "details": f"Parsed Target Name: '{target_name}', Context Anchors: {anchors} via {parser_used}"},
                             {"step": "360° OSINT SERP Matrix", "status": "running", "details": f"Querying LinkedIn, GitHub, Twitter/X, News, Corporate Registries for '{target_name}'..."},
                             {"step": "360° OSINT SERP Matrix", "status": "completed", "details": "Multi-platform SERP queries executed successfully."},
                             {"step": "Deep Content Ingestion", "status": "running", "details": "Scraping full Markdown text for top matched profiles and web pages..."},
