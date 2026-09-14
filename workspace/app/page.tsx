@@ -57,11 +57,13 @@ export default function WorkspaceDashboard() {
     socketRef.current = ws;
 
     ws.onopen = () => {
+      if (socketRef.current !== ws) return;
       setConnected(true);
       addLocalLog("System", "completed", `Connected to agent pipeline telemetry at ${fullUrl}`);
     };
 
     ws.onmessage = (event) => {
+      if (socketRef.current !== ws) return;
       try {
         const data = JSON.parse(event.data);
         if (data.type === "telemetry" && data.steps) {
@@ -84,12 +86,14 @@ export default function WorkspaceDashboard() {
     };
 
     ws.onclose = () => {
+      if (socketRef.current !== ws) return;
       setConnected(false);
       setIsRunning(false);
       addLocalLog("System", "failed", "WebSocket connection closed.");
     };
 
     ws.onerror = (err) => {
+      if (socketRef.current !== ws) return;
       console.error("WebSocket error:", err);
       addLocalLog("System", "failed", "WebSocket encountered an error.");
     };

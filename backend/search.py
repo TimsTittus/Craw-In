@@ -87,6 +87,8 @@ from sqlalchemy.orm import declarative_base, Session
 
 Base = declarative_base()
 
+_KEYWORD_ENGINES: Dict[str, Any] = {}
+
 class KeywordDocument(Base):
     """Simple table for keyword / full‑text search.
 
@@ -116,8 +118,11 @@ def get_keyword_engine(db_url: str = None) -> Session:
             db_url = "sqlite:////app/keyword_store.db"
         else:
             db_url = f"sqlite:///{os.path.abspath('keyword_store.db')}"
-    engine = create_engine(db_url, echo=False, future=True)
-    Base.metadata.create_all(engine)
+    engine = _KEYWORD_ENGINES.get(db_url)
+    if engine is None:
+        engine = create_engine(db_url, echo=False, future=True)
+        Base.metadata.create_all(engine)
+        _KEYWORD_ENGINES[db_url] = engine
     return Session(engine)
 
 def add_keyword_document(session: Session, title: str, content: str, source: str = None) -> KeywordDocument:

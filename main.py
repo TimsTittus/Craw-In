@@ -37,7 +37,7 @@ from backend.api.v1.router import router as api_router
 from backend.plugins import load_plugins
 
 # Load plugins once at startup to enable connection pooling & shared caching
-plugins_map = load_plugins("backend/plugins")
+plugins_map = load_plugins(str(Path(__file__).resolve().parent / "backend" / "plugins"))
 
 app = FastAPI(title='InfoOS Core')
 app.add_middleware(
@@ -52,20 +52,29 @@ app.include_router(api_router, prefix="/api/v1")
 class ConnectionManager:
     """Manage active WebSocket connections for broadcasting task updates."""
     def __init__(self) -> None:
-        self.active_connections: list[WebSocket] = []
+        self.active_connections: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, task_id: str) -> None:
         await websocket.accept()
-        self.active_connections.append(websocket)
+        self.active_connections.setdefault(task_id, []).append(websocket)
 
-    def disconnect(self, websocket: WebSocket) -> None:
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+    def disconnect(self, websocket: WebSocket, task_id: str) -> None:
+        conns = self.active_connections.get(task_id)
+        if conns and websocket in conns:
+            conns.remove(websocket)
+            if not conns:
+                del self.active_connections[task_id]
 
-    async def broadcast(self, message: str) -> None:
-        """Send a text message to all connected clients."""
-        for connection in self.active_connections:
-            await connection.send_text(message)
+    async def broadcast(self, message: str, task_id: str) -> None:
+        """Send a text message to all clients subscribed to ``task_id``.
+
+        A dead connection is dropped instead of aborting delivery to the rest.
+        """
+        for connection in list(self.active_connections.get(task_id, [])):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                self.disconnect(connection, task_id)
 
 manager = ConnectionManager()
 
@@ -101,10 +110,41 @@ def _parse_person_recon_prompt(prompt: str) -> tuple[str, dict]:
     name = re.sub(r'\s+(who\s+is|is|wokring|working)+$', '', name, flags=re.IGNORECASE).strip()
     return name, context
 
+def _clean_detected_url(url: str) -> str:
+    """Strip trailing punctuation picked up from prose (e.g. 'see https://x.com.')."""
+    while url:
+        last = url[-1]
+        if last in ".,;:!?'\"":
+            url = url[:-1]
+        elif last == ")" and url.count(")") > url.count("("):
+            url = url[:-1]
+        elif last == "]" and url.count("]") > url.count("["):
+            url = url[:-1]
+        else:
+            break
+    return url
+
+def _latest_docs_for_urls(urls: list[str]) -> list:
+    """Return the most recently indexed keyword document for each URL, in ``urls`` order."""
+    if not urls:
+        return []
+    with get_keyword_engine() as session:
+        rows = (
+            session.query(KeywordDocument)
+            .filter(KeywordDocument.title.in_(urls))
+            .order_by(KeywordDocument.id.desc())
+            .all()
+        )
+        session.expunge_all()
+    latest: dict = {}
+    for row in rows:
+        latest.setdefault(row.title, row)
+    return [latest[u] for u in dict.fromkeys(urls) if u in latest]
+
 @app.websocket("/ws/tasks/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
     """WebSocket endpoint for streaming task state updates and plugin execution."""
-    await manager.connect(websocket)
+    await manager.connect(websocket, task_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -119,12 +159,15 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     
                     # Detect if prompt is an explicit HTTP/HTTPS URL
                     http_match = re.search(r'https?://[^\s]+', prompt)
-                    target_url = http_match.group(0) if http_match else None
+                    target_url = _clean_detected_url(http_match.group(0)) if http_match else None
                     
                     # Determine execution path: (1) Direct URL (2) Person Recon Plugin (3) Search API / DB
-                    is_person_query = not target_url and ("person_recon" in plugins_map) and any(
-                        kw in prompt.lower() for kw in ["find", "who is", "recon", "working", "employee", "profile", "whereabouts", "person", "at", "in"]
-                    ) or (not target_url and "person_recon" in plugins_map and len(prompt.split()) <= 4)
+                    prompt_lower = prompt.lower()
+                    has_recon = "instance" in plugins_map.get("person_recon", {})
+                    has_person_kw = any(
+                        kw in prompt_lower for kw in ["find", "who is", "recon", "working", "employee", "profile", "whereabouts", "person"]
+                    ) or re.search(r"\b(?:at|in)\b", prompt_lower) is not None
+                    is_person_query = not target_url and has_recon and (has_person_kw or len(prompt.split()) <= 4)
                     
                     if is_person_query:
                         target_name, anchors = _parse_person_recon_prompt(prompt)
@@ -168,7 +211,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                             "status": "running" if step != steps[-1] else "completed",
                             "steps": current_steps
                         }
-                        await manager.broadcast(json.dumps(telemetry))
+                        await manager.broadcast(json.dumps(telemetry), task_id)
                         await asyncio.sleep(0.5)
 
                     # Execution Engine
@@ -179,8 +222,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                         if target_url:
                             print(f"[main.py] Ingesting single URL: {target_url}", flush=True)
                             await ingest_urls([target_url])
-                            session = get_keyword_engine()
-                            docs_filtered = session.query(KeywordDocument).all()
+                            docs_filtered = _latest_docs_for_urls([target_url])
                             for d in docs_filtered:
                                 content_preview = d.content[:1500] + ("..." if len(d.content) > 1500 else "")
                                 results_text.append(f"### [{d.title}]({d.title})\n{content_preview}")
@@ -195,7 +237,6 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 
                         elif is_person_query:
                             recon_plugin = plugins_map["person_recon"]["instance"]
-                            target_name, anchors = _parse_person_recon_prompt(prompt)
                             print(f"[main.py] Executing person_recon plugin for '{target_name}' with anchors: {anchors}", flush=True)
                             
                             recon_output = await recon_plugin.execute(target_name, anchors)
@@ -209,10 +250,10 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 
                             for idx, match in enumerate(top_matches, 1):
                                 platform = match.get("platform", "web").upper()
-                                title = match.get("title", "Untitled")
-                                url = match.get("url", "#")
+                                title = match.get("title") or "Untitled"
+                                url = match.get("url") or "#"
                                 confidence = match.get("match_confidence", 0.5)
-                                full_text = match.get("full_text", match.get("snippet", ""))
+                                full_text = match.get("full_text") or match.get("snippet") or ""
                                 preview = full_text[:1200] + ("..." if len(full_text) > 1200 else "")
 
                                 item_md = (
@@ -239,8 +280,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                                 if search_results and "error" not in search_results[0]:
                                     urls_found = [res["url"] for res in search_results if res.get("url")]
                                     await ingest_urls(urls_found[:3])
-                                    session = get_keyword_engine()
-                                    docs_filtered = session.query(KeywordDocument).all()
+                                    docs_filtered = _latest_docs_for_urls(urls_found[:3])
                                     for d in docs_filtered:
                                         content_preview = d.content[:1000] + ("..." if len(d.content) > 1000 else "")
                                         results_text.append(f"[{d.title}]\n{content_preview}")
@@ -259,7 +299,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                             "type": "result",
                             "content": final_output,
                             "results_json": analyzed_results
-                        }))
+                        }), task_id)
                     except Exception as e:
                         import traceback
                         error_tb = traceback.format_exc()
@@ -267,19 +307,19 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                         await manager.broadcast(json.dumps({
                             "type": "result",
                             "content": f"⚠️ Error during execution: {str(e)}"
-                        }))
+                        }), task_id)
                 else:
-                    await manager.broadcast(data)
+                    await manager.broadcast(data, task_id)
             except Exception:
-                await manager.broadcast(data)
+                await manager.broadcast(data, task_id)
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        manager.disconnect(websocket, task_id)
         print(f"[main.py] WebSocket disconnected for task {task_id}. Cleaning up session databases...", flush=True)
         try:
             # Clear SQLite keyword database
-            session = get_keyword_engine()
-            session.query(KeywordDocument).delete()
-            session.commit()
+            with get_keyword_engine() as session:
+                session.query(KeywordDocument).delete()
+                session.commit()
             print("[main.py] Cleared SQLite keyword documents.", flush=True)
         except Exception as e:
             print(f"[main.py] Error clearing SQLite keyword documents: {e}", flush=True)
@@ -292,3 +332,5 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
             print("[main.py] Reinitialized Qdrant 'documents' collection.", flush=True)
         except Exception as e:
             print(f"[main.py] Error reinitializing Qdrant collection: {e}", flush=True)
+    finally:
+        manager.disconnect(websocket, task_id)

@@ -122,6 +122,15 @@ _DIRECT_PROFILE_URLS = {
     "substack":  "https://{username}.substack.com",
 }
 
+# Strong references to fire-and-forget indexing tasks (asyncio only keeps weak ones)
+_BACKGROUND_TASKS: set = set()
+
+
+def _on_background_done(task: "asyncio.Task") -> None:
+    _BACKGROUND_TASKS.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        print(f"[PersonReconPlugin] Background indexing failed: {task.exception()}", flush=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Plugin
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +186,12 @@ class PersonReconPlugin(BasePlugin):
         q = template.format(name=name, anchor_str=anchor_str).strip()
         return re.sub(r"\s{2,}", " ", q)
 
+    @staticmethod
+    async def _backoff(attempt: int) -> None:
+        """Exponential backoff between retries (no pointless sleep after the last attempt)."""
+        if attempt < _RETRY_ATTEMPTS - 1:
+            await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+
     # ── Jina SERP fetch ───────────────────────────────────────────────────────
 
     async def _fetch_jina(
@@ -195,12 +210,12 @@ class PersonReconPlugin(BasePlugin):
                     return data, None
                 if res.status_code in (429, 500, 502, 503, 504):
                     last_error = f"Jina HTTP {res.status_code}"
-                    await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                    await self._backoff(attempt)
                     continue
                 return [], f"Jina HTTP {res.status_code}"
             except httpx.TimeoutException:
                 last_error = "Jina timeout"
-                await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                await self._backoff(attempt)
             except Exception as exc:
                 return [], f"Jina error: {exc}"
 
@@ -221,7 +236,7 @@ class PersonReconPlugin(BasePlugin):
                     if res.status_code != 200:
                         last_error = f"DDG HTTP {res.status_code}"
                         if res.status_code in (202, 429, 500, 502, 503):
-                            await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                            await self._backoff(attempt)
                             continue
                         return [], last_error
 
@@ -252,11 +267,11 @@ class PersonReconPlugin(BasePlugin):
                     if results:
                         return results, None
                     last_error = "DDG returned 0 results"
-                    await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                    await self._backoff(attempt)
 
             except httpx.TimeoutException:
                 last_error = "DDG timeout"
-                await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                await self._backoff(attempt)
             except Exception as exc:
                 return [], f"DDG error: {exc}"
 
@@ -268,22 +283,27 @@ class PersonReconPlugin(BasePlugin):
         self, username: str, name: str
     ) -> List[Dict[str, Any]]:
         """Probe direct profile URLs for a known username."""
-        results: List[Dict[str, Any]] = []
+        async def _probe(client: httpx.AsyncClient, platform: str, url_template: str) -> Optional[Dict[str, Any]]:
+            url = url_template.format(username=username)
+            try:
+                res = await client.head(url)
+                if res.status_code == 200:
+                    return {
+                        "title": f"{name} — {platform.title()} Profile",
+                        "url": str(res.url),
+                        "content": f"Direct profile URL verified for @{username}",
+                        "_platform": platform,
+                    }
+            except Exception:
+                pass
+            return None
+
+        # Probe all platforms concurrently; gather preserves platform order
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            for platform, url_template in _DIRECT_PROFILE_URLS.items():
-                url = url_template.format(username=username)
-                try:
-                    res = await client.head(url)
-                    if res.status_code == 200:
-                        results.append({
-                            "title": f"{name} — {platform.title()} Profile",
-                            "url": str(res.url),
-                            "content": f"Direct profile URL verified for @{username}",
-                            "_platform": platform,
-                        })
-                except Exception:
-                    pass
-        return results
+            probed = await asyncio.gather(
+                *(_probe(client, platform, tpl) for platform, tpl in _DIRECT_PROFILE_URLS.items())
+            )
+        return [r for r in probed if r]
 
     # ── Per-platform orchestrator ─────────────────────────────────────────────
 
@@ -535,10 +555,12 @@ class PersonReconPlugin(BasePlugin):
         # ── Phase 3: DEEP PAGE SCRAPING & CONTENT EXTRACTION ──
         top_targets = profiles[:_DEEP_SCRAPE_TOP_K]
         top_urls = [p["url"] for p in top_targets if p.get("url")]
+        scraped_count = 0
 
         if top_urls:
             print(f"[PersonReconPlugin] Deep-scraping full page content for top {len(top_urls)} verified matches...", flush=True)
             scraped_content = await self._deep_scrape_pages(top_urls)
+            scraped_count = len(scraped_content)
             
             for profile in profiles:
                 url = profile.get("url")
@@ -551,7 +573,9 @@ class PersonReconPlugin(BasePlugin):
             try:
                 from backend.ingestion import ingest_urls
                 print(f"[PersonReconPlugin] Auto-indexing top {len(top_urls)} URLs into Qdrant & SQLite...", flush=True)
-                asyncio.create_task(ingest_urls(top_urls))
+                task = asyncio.create_task(ingest_urls(top_urls))
+                _BACKGROUND_TASKS.add(task)
+                task.add_done_callback(_on_background_done)
             except Exception as exc:
                 print(f"[PersonReconPlugin] Background indexing notice: {exc}", flush=True)
 
@@ -573,7 +597,7 @@ class PersonReconPlugin(BasePlugin):
         print(
             f"[PersonReconPlugin] 360° Recon complete for '{person_name}' — "
             f"{len(profiles)} verified profiles & footprints | "
-            f"deep-scraped: {len(top_urls)} full pages.",
+            f"deep-scraped: {scraped_count}/{len(top_urls)} full pages.",
             flush=True,
         )
 
@@ -583,7 +607,7 @@ class PersonReconPlugin(BasePlugin):
                 "anchors_used": anchors_used,
                 "total_matches_found": len(profiles),
                 "platform_status": platform_status,
-                "deep_scraped_count": len(top_urls),
+                "deep_scraped_count": scraped_count,
                 "top_matches": profiles[:_TOP_N],
             }
         ]

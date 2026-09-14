@@ -4,7 +4,7 @@ import time
 from typing import Dict, Any, List, Optional
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote
 
 from backend.plugins.base import BasePlugin, PluginManifest
 
@@ -150,7 +150,7 @@ class SearchApiPlugin(BasePlugin):
         else:
             # Try Jina AI Search
             client = self._get_client()
-            url = f"{self.base_url}{search_target}"
+            url = f"{self.base_url}{quote(search_target, safe='')}"
             max_retries = 3
             initial_delay = 0.5
             delay = initial_delay

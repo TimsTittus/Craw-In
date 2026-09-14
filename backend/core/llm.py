@@ -1,4 +1,5 @@
 import abc
+import json
 from typing import Optional, Dict, Any, AsyncGenerator
 from pydantic import BaseModel, Field, model_validator
 import httpx
@@ -40,7 +41,7 @@ class OllamaClient(BaseLLMClient):
         if "localhost" in base_url or "127.0.0.1" in base_url:
             try:
                 await client.get(f"{base_url}/api/version", timeout=1.0)
-            except httpx.ConnectError:
+            except (httpx.ConnectError, httpx.TimeoutException):
                 base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
         
         if self.model not in ["auto", ""]:
@@ -86,7 +87,7 @@ class OllamaClient(BaseLLMClient):
             async with client.stream("POST", f"{base_url}/api/generate", json=payload) as response:
                 async for line in response.aiter_lines():
                     if line:
-                        yield httpx.json.loads(line).get("response", "")
+                        yield json.loads(line).get("response", "")
 
     async def ping(self) -> str:
         try:
@@ -168,7 +169,7 @@ class OpenAIChatClient(BaseLLMClient):
                         if data_str == "[DONE]":
                             break
                         try:
-                            chunk = httpx.json.loads(data_str)
+                            chunk = json.loads(data_str)
                             delta = chunk["choices"][0]["delta"].get("content", "")
                             if delta:
                                 yield delta

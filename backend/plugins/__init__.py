@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import json
 import pathlib
 from pydantic import ValidationError
@@ -23,7 +24,8 @@ def load_plugins(directory: str) -> Dict[str, Any]:
     base_path = pathlib.Path(directory)
     for manifest_path in base_path.glob('**/manifest.json'):
         try:
-            manifest_data = json.load(open(manifest_path))
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest_data = json.load(f)
             manifest = PluginManifest(**manifest_data)
         except (json.JSONDecodeError, ValidationError) as e:
             plugins[manifest_path.parent.name] = {"error": f"Manifest validation failed: {e}"}

@@ -79,3 +79,7 @@ class ConcurrentIngestionEngine:
             except httpx.RequestError as e:
                 # Catch DNS failures, connection timeouts, etc.
                 return {"url": url, "content": "", "status": 0, "source": "none"}
+            except Exception as e:
+                # Invalid URLs, extraction failures, etc. – treat as unreachable
+                logger.warning(f"Failed to process {url}: {e}")
+                return {"url": url, "content": "", "status": 0, "source": "none"}

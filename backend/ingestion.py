@@ -36,20 +36,25 @@ async def ingest_urls(urls: List[str], collection_name: str = "documents") -> No
     # Initialise crawl engine and Qdrant client
     crawler = ConcurrentIngestionEngine()
     fabric = SearchIndexingFabric()
-    fabric.initialize_collection(collection_name, dim=384) 
+    fabric.initialize_collection(collection_name, dim=384)
+
+    # Fetch all URLs concurrently (bounded by the crawler's semaphore)
+    results = await asyncio.gather(*(crawler.process_url(u) for u in urls), return_exceptions=True)
 
     kw_session = get_keyword_engine()
-    
-    existing_count = kw_session.query(KeywordDocument).count()
+    try:
+        for url, result in zip(urls, results):
+            if isinstance(result, BaseException) or result["status"] != 200:
+                continue
+            text = result.get("content", "") or ""
+            source = result.get("source", "unknown")
+            # Store in keyword DB; its primary key doubles as a collision-free Qdrant point id
+            doc = add_keyword_document(kw_session, title=url, content=text, source=source)
+            # Compute embedding and upsert into Qdrant off the event loop
+            vector = await asyncio.to_thread(_embed, text)
+            await asyncio.to_thread(fabric.index_document, collection_name, doc.id, vector, {"url": url})
+    finally:
+        kw_session.close()
 
-    for idx, url in enumerate(urls, start=existing_count + 1):
-        result = await crawler.process_url(url)
-        if result["status"] != 200:
-            continue
-        text = result.get("content", "") or ""
-        source = result.get("source", "unknown")
-        # Store in keyword DB
-        add_keyword_document(kw_session, title=url, content=text, source=source)
-        # Compute embedding and upsert into Qdrant
-        vector = list(embedder.embed([text]))[0].tolist()
-        fabric.index_document(collection_name, doc_id=idx, vector=vector, payload={"url": url})
+def _embed(text: str) -> List[float]:
+    return list(embedder.embed([text]))[0].tolist()
