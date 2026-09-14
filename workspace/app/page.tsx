@@ -20,6 +20,7 @@ import { AnalyticsDisplayGrid, AnalyzedResult } from "@/components/ui/analytics-
 import { LLMConfigPanel, LLMConfigState } from "@/components/llm-config-panel";
 import { JobSearchPanel } from "@/components/job-search-panel";
 import { JobResults } from "@/components/job-results";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { jobToAnalyzedResult, toJobOutcome, type JobSearchFilters, type JobSearchOutcome } from "@/lib/job-search";
 
 interface LogStep {
@@ -228,6 +229,8 @@ export default function WorkspaceDashboard() {
             </p>
           </div>
 
+          <div className="flex items-center gap-3">
+          <ThemeToggle />
           {/* Connection Status Bar */}
           <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-xs">
             <div className="flex items-center gap-2">
@@ -253,6 +256,7 @@ export default function WorkspaceDashboard() {
             >
               <RefreshCw className="h-3.5 w-3.5" />
             </button>
+          </div>
           </div>
         </header>
 

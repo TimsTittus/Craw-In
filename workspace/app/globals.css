@@ -24,3 +24,72 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/*
+ * Light (glassmorphic) mode — toggled by the `light` class on <html>.
+ * Tailwind v4 resolves every color utility through these variables, so remapping
+ * them flips the whole UI without touching component markup. Slate is inverted
+ * (dark surfaces become translucent white glass), accents shift to darker shades
+ * for contrast on light backgrounds.
+ */
+html.light {
+  color-scheme: light;
+
+  --color-white: oklch(20.8% 0.042 265.755);
+
+  --color-slate-50: oklch(12.9% 0.042 264.695);
+  --color-slate-100: oklch(20.8% 0.042 265.755);
+  --color-slate-200: oklch(27.9% 0.041 260.031);
+  --color-slate-300: oklch(37.2% 0.044 257.287);
+  --color-slate-400: oklch(44.6% 0.043 257.281);
+  --color-slate-600: oklch(70.4% 0.04 256.788);
+  --color-slate-700: oklch(86.9% 0.022 252.894);
+  --color-slate-800: oklch(92.9% 0.013 255.508);
+  --color-slate-900: oklch(100% 0 0 / 0.7);
+  --color-slate-950: oklch(100% 0 0 / 0.55);
+
+  --color-cyan-200: oklch(45% 0.085 224.283);
+  --color-cyan-300: oklch(52% 0.105 223.128);
+  --color-cyan-400: oklch(60.9% 0.126 221.723);
+  --color-cyan-800: oklch(91.7% 0.08 205.041);
+  --color-cyan-900: oklch(95.6% 0.045 203.388);
+  --color-cyan-950: oklch(98.4% 0.019 200.873);
+
+  --color-emerald-200: oklch(43.2% 0.095 166.913);
+  --color-emerald-300: oklch(50.8% 0.118 165.612);
+  --color-emerald-400: oklch(59.6% 0.145 163.225);
+  --color-emerald-800: oklch(90.5% 0.093 164.15);
+  --color-emerald-900: oklch(95% 0.052 163.051);
+  --color-emerald-950: oklch(97.9% 0.021 166.113);
+
+  --color-rose-200: oklch(45.5% 0.188 13.697);
+  --color-rose-300: oklch(51.4% 0.222 16.935);
+  --color-rose-400: oklch(58.6% 0.253 17.585);
+  --color-rose-800: oklch(89.2% 0.058 10.001);
+  --color-rose-900: oklch(94.1% 0.03 12.58);
+  --color-rose-950: oklch(96.9% 0.015 12.422);
+
+  --color-amber-200: oklch(47.3% 0.137 46.201);
+  --color-amber-300: oklch(55.5% 0.163 48.998);
+  --color-amber-400: oklch(66.6% 0.179 58.318);
+  --color-amber-800: oklch(92.4% 0.12 95.746);
+  --color-amber-900: oklch(96.2% 0.059 95.617);
+  --color-amber-950: oklch(98.7% 0.022 95.277);
+
+  --color-purple-400: oklch(55.8% 0.288 302.321);
+}
+
+html.light body {
+  background:
+    radial-gradient(circle at 12% 8%, oklch(91.7% 0.08 205.041 / 0.55), transparent 40%),
+    radial-gradient(circle at 88% 20%, oklch(90.2% 0.063 306.703 / 0.5), transparent 45%),
+    radial-gradient(circle at 50% 100%, oklch(90.5% 0.093 164.15 / 0.45), transparent 50%),
+    oklch(97.5% 0.008 250);
+  background-attachment: fixed;
+}
+
+html.light :is([data-slot="card"], .rounded-xl[class*="bg-slate-9"], .rounded-xl[class*="from-slate-9"], .fixed[class*="bg-slate-9"]) {
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  box-shadow: 0 8px 32px oklch(55.4% 0.046 257.417 / 0.12), inset 0 1px 0 oklch(100% 0 0 / 0.6);
+}
