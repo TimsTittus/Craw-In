@@ -206,16 +206,20 @@ def _identity_keys(job: JobPosting) -> Set[str]:
     return keys
 
 
-def _shingles(text: str) -> Set[Tuple[str, ...]]:
-    words = tokens(text)[:_SHINGLE_MAX_TOKENS]
+def _shingles(all_words: List[str]) -> Set[Tuple[str, ...]]:
+    words = all_words[:_SHINGLE_MAX_TOKENS]
     return {tuple(words[i:i + _SHINGLE_SIZE]) for i in range(max(0, len(words) - _SHINGLE_SIZE + 1))}
 
 
 def description_similarity(a: str, b: str) -> Optional[float]:
     """Jaccard similarity of word 3-shingles; None when either text is too short to judge."""
-    if len(tokens(a)) < _MIN_TOKENS_FOR_SIMILARITY or len(tokens(b)) < _MIN_TOKENS_FOR_SIMILARITY:
+    words_a = tokens(a)
+    if len(words_a) < _MIN_TOKENS_FOR_SIMILARITY:
         return None
-    sa, sb = _shingles(a), _shingles(b)
+    words_b = tokens(b)
+    if len(words_b) < _MIN_TOKENS_FOR_SIMILARITY:
+        return None
+    sa, sb = _shingles(words_a), _shingles(words_b)
     return len(sa & sb) / len(sa | sb) if sa and sb else None
 
 
@@ -230,7 +234,8 @@ def _locations_compatible(a: JobPosting, b: JobPosting) -> bool:
 
 def _is_near_duplicate(a: JobPosting, b: JobPosting) -> bool:
     """Level 3: same company, near-identical title, compatible location AND similar description."""
-    if not company_key(a.company) or company_key(a.company) != company_key(b.company):
+    company = company_key(a.company)
+    if not company or company != company_key(b.company):
         return False
     if difflib.SequenceMatcher(None, title_key(a.title), title_key(b.title)).ratio() < _TITLE_SIMILARITY_MIN:
         return False
@@ -280,7 +285,8 @@ def merge_duplicates(jobs: List[JobPosting]) -> Tuple[List[JobPosting], int]:
     removed = 0
     for job in sorted(jobs, key=_completeness, reverse=True):
         keys = _identity_keys(job)
-        position = next((index[k] for k in keys if k in index), None)
+        # Lowest matching group: deterministic (set order is not) and the most complete record.
+        position = min((index[k] for k in keys if k in index), default=None)
         if position is None:
             position = next((i for i, g in enumerate(groups) if _is_near_duplicate(g, job)), None)
         if position is None:

@@ -17,6 +17,7 @@ import ipaddress
 import re
 import socket
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal, Optional, Pattern, Tuple
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -90,12 +91,15 @@ _SAFE_PORTS = (None, 80, 443)
 _BLOCKED_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".intranet")
 
 _DNS_CACHE = SimpleTTLCache(ttl_seconds=300.0)
+# Pure string → value helpers below run many times per URL during a search; memoise them.
+_URL_MEMO_SIZE: int = 4_096
 
 
 class BlockedURLError(httpx.RequestError):
     """Raised by the request guard when a URL targets a non-public destination."""
 
 
+@lru_cache(maxsize=_URL_MEMO_SIZE)
 def hostname(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -105,6 +109,7 @@ def _host_matches(host: str, domains: Tuple[str, ...]) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
+@lru_cache(maxsize=_URL_MEMO_SIZE)
 def identify_source(url: str) -> Optional[SourceProfile]:
     host = hostname(url)
     return next((p for p in SOURCE_PROFILES if _host_matches(host, p.domains)), None)
@@ -123,8 +128,13 @@ def unwrap_redirect(url: str) -> str:
     for key, value in parse_qsl(parts.query, keep_blank_values=False):
         if key.lower() in _REDIRECT_PARAMS:
             candidate = unquote(value)
-            if candidate.startswith(("http://", "https://")) and urlsplit(candidate).hostname:
-                return candidate
+            if not candidate.startswith(("http://", "https://")):
+                continue
+            try:
+                if urlsplit(candidate).hostname:
+                    return candidate
+            except ValueError:  # malformed target (e.g. "http://[bad") — not a usable redirect
+                continue
     return url
 
 
@@ -160,6 +170,7 @@ def _path_and_query(url: str) -> str:
     return f"{parts.path}?{parts.query}" if parts.query else parts.path
 
 
+@lru_cache(maxsize=_URL_MEMO_SIZE)
 def posting_id(url: str) -> Optional[str]:
     """Stable ``source:id`` key for a posting on a known platform (same job, different URL shapes)."""
     profile = identify_source(url)
@@ -169,6 +180,7 @@ def posting_id(url: str) -> Optional[str]:
     return f"{profile.name.lower()}:{match.group(1).lower()}" if match else None
 
 
+@lru_cache(maxsize=_URL_MEMO_SIZE)
 def dedup_key(url: str) -> str:
     """Level-1 deduplication key: platform job id when known, else the canonical URL without scheme."""
     job_id = posting_id(url)
@@ -180,6 +192,7 @@ def dedup_key(url: str) -> str:
     return f"{host}{parts.path}" + (f"?{parts.query}" if parts.query else "")
 
 
+@lru_cache(maxsize=_URL_MEMO_SIZE)
 def classify_url(url: str) -> UrlKind:
     """Is this URL a single posting, a search/listing page, or unclear?"""
     if posting_id(url):

@@ -346,7 +346,10 @@ def _application_candidates(soup: BeautifulSoup, page_url: str, page_profile: Op
         href = str(anchor["href"]).strip()
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
-        target = canonicalize_url(unwrap_redirect(urljoin(page_url, href)))
+        try:
+            target = canonicalize_url(unwrap_redirect(urljoin(page_url, href)))
+        except ValueError:  # malformed href (e.g. "http://[bad") — skip the link, keep the page
+            continue
         if not target or _AUTH_PATH.search(urlsplit(target).path):
             continue
         label = " ".join(filter(None, (anchor.get_text(" ", strip=True), anchor.get("aria-label"), anchor.get("title"))))[:160]
@@ -383,14 +386,21 @@ def _choose_application(
     return page_url, page_type
 
 
-def harvest_posting_links(html: str, base_url: str, limit: int) -> List[str]:
-    """Individual posting URLs linked from a listing/search page."""
+def harvest_posting_links(html: str, base_url: str, limit: int, soup: Optional[BeautifulSoup] = None) -> List[str]:
+    """Individual posting URLs linked from a listing/search page.
+
+    ``soup`` may be passed to reuse an already-parsed copy of ``html``.
+    """
     if not html:
         return []
-    soup = BeautifulSoup(html, "html.parser")
+    if soup is None:
+        soup = BeautifulSoup(html, "html.parser")
     links: Dict[str, str] = {}
     for anchor in soup.find_all("a", href=True):
-        url = canonicalize_url(unwrap_redirect(urljoin(base_url, str(anchor["href"]))))
+        try:
+            url = canonicalize_url(unwrap_redirect(urljoin(base_url, str(anchor["href"]))))
+        except ValueError:  # malformed href (e.g. "http://[bad") — skip the link, keep harvesting
+            continue
         if url and not is_non_job_domain(url) and classify_url(url) == "posting":
             links.setdefault(dedup_key(url), url)
         if len(links) >= limit:
@@ -419,11 +429,18 @@ def parse_job_page(
     now: datetime.datetime,
     hint_title: str = "",
     overrides: Optional[Dict[str, str]] = None,
+    soup: Optional[BeautifulSoup] = None,
 ) -> Optional[JobPosting]:
-    """Build a JobPosting from a crawled page, or return None if the page is not a single job."""
+    """Build a JobPosting from a crawled page, or return None if the page is not a single job.
+
+    ``soup`` may be passed to reuse an already-parsed copy of ``html``; it is only read, never modified.
+    """
     page_url = canonicalize_url(final_url or url) or url
     profile = identify_source(page_url)
-    soup = BeautifulSoup(html, "html.parser") if html else None
+    if not html:
+        soup = None
+    elif soup is None:
+        soup = BeautifulSoup(html, "html.parser")
     node = _find_job_posting(soup) if soup is not None else None
     overrides = overrides or {}
     text = markdown or ""

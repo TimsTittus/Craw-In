@@ -27,9 +27,11 @@ Context keys accepted by ``execute``:
 import asyncio
 import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Tuple
 
 import httpx
+from bs4 import BeautifulSoup
 
 from backend.crawler import ConcurrentIngestionEngine
 from backend.plugins.base import BasePlugin, PluginManifest
@@ -65,6 +67,7 @@ from backend.plugins.job_search_plugin.urls import (
     is_public_url,
     unwrap_redirect,
 )
+from backend.plugins.job_search_plugin import urls as _urls
 from backend.plugins.search_api_plugin.plugin import SimpleTTLCache
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,6 +102,11 @@ _VERIFY_MAX_BODY_BYTES: int = 400_000
 _PAGE_CACHE_TTL_S: float = 1_800.0   # extracted pages
 _VERIFY_CACHE_TTL_S: float = 600.0   # availability changes — keep this short
 
+# HTML parsing is CPU-bound; a small dedicated pool keeps it off the event loop (so crawls, emits and
+# WebSockets stay responsive) without competing with the default executor used for DNS resolution.
+_PARSE_WORKERS: int = 4
+_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=_PARSE_WORKERS, thread_name_prefix="job-search-parse")
+
 EmitFn = Callable[[str, str, str, str], Awaitable[None]]
 PageMap = Dict[str, Dict[str, Any]]
 
@@ -109,6 +117,17 @@ class SearchProvider(Protocol):
 
 async def _silent_emit(event: str, step: str, status: str, details: str) -> None:
     return None
+
+
+async def _off_loop(fn: Callable[..., Any], *args: Any) -> Any:
+    return await asyncio.get_running_loop().run_in_executor(_PARSE_EXECUTOR, fn, *args)
+
+
+def _prune_expired(cache: SimpleTTLCache) -> None:
+    """Drop expired entries. SimpleTTLCache only evicts on a hit, so unrequested pages would otherwise pile up."""
+    now = time.time()
+    for key in [k for k, (_, expiry) in cache.cache.items() if expiry <= now]:
+        del cache.cache[key]
 
 
 def _describe_spec(spec: JobSearchQuery, parser: str) -> str:
@@ -157,6 +176,8 @@ class JobSearchPlugin(BasePlugin):
         started = time.monotonic()
         now = utcnow()
         summary = JobSearchSummary()
+        for cache in (self._page_cache, self._verify_cache, _urls._DNS_CACHE):
+            _prune_expired(cache)
 
         await emit("job_search_started", "Job Search", "running", "Job search started.")
         try:
@@ -311,7 +332,10 @@ class JobSearchPlugin(BasePlugin):
             return cached
         if not await is_public_url(url):
             return {"url": url, "content": "", "status": 0, "source": "blocked"}
-        slot = host_slots.setdefault(hostname(url), asyncio.Semaphore(_HOST_CONCURRENCY))
+        host = hostname(url)
+        slot = host_slots.get(host)
+        if slot is None:
+            slot = host_slots[host] = asyncio.Semaphore(_HOST_CONCURRENCY)
         async with slot:
             try:
                 page = await asyncio.wait_for(self._crawler.process_url(url), timeout=_CRAWL_TIMEOUT_S)
@@ -349,13 +373,12 @@ class JobSearchPlugin(BasePlugin):
                     summary.crawl_failures += 1
                 else:
                     summary.crawled += 1
-                    job = self._parse(url, page, now, hints.get(url, ""))
+                    job, links = await _off_loop(self._parse_or_harvest, url, page, now, hints.get(url, ""))
                     if job:
                         jobs.append(job)
                     else:
                         unparsed.append(url)
-                        harvested.extend(harvest_posting_links(str(page.get("html") or ""),
-                                                               str(page.get("final_url") or url), _HARVEST_PER_PAGE))
+                        harvested.extend(links)
                 await emit("job_extracted", "Deep Crawl", "running",
                            f"Crawled {summary.crawled + summary.crawl_failures}/{total} pages · {len(jobs)} jobs extracted.")
 
@@ -386,9 +409,25 @@ class JobSearchPlugin(BasePlugin):
                    f"Crawled {summary.crawled} pages ({summary.crawl_failures} unavailable) · {len(jobs)} jobs extracted.")
         return jobs, pages
 
+    @classmethod
+    def _parse_or_harvest(cls, url: str, page: Dict[str, Any], now: datetime.datetime,
+                          hint_title: str) -> Tuple[Optional[JobPosting], List[str]]:
+        """Extract a job; if the page is not one, harvest its posting links. The HTML is parsed only once."""
+        html = str(page.get("html") or "")
+        try:
+            soup = BeautifulSoup(html, "html.parser") if html else None
+            job = cls._parse(url, page, now, hint_title, soup=soup)
+            if job:
+                return job, []
+            return None, harvest_posting_links(html, str(page.get("final_url") or url), _HARVEST_PER_PAGE, soup=soup)
+        except Exception as exc:  # malformed markup must never abort the search
+            print(f"[JobSearchPlugin] Extraction failed for {hostname(url)}: {type(exc).__name__}: {exc}", flush=True)
+            return None, []
+
     @staticmethod
     def _parse(url: str, page: Dict[str, Any], now: datetime.datetime, hint_title: str,
-               overrides: Optional[Dict[str, str]] = None) -> Optional[JobPosting]:
+               overrides: Optional[Dict[str, str]] = None,
+               soup: Optional[BeautifulSoup] = None) -> Optional[JobPosting]:
         try:
             return parse_job_page(
                 url=url,
@@ -399,6 +438,7 @@ class JobSearchPlugin(BasePlugin):
                 now=now,
                 hint_title=hint_title,
                 overrides=overrides,
+                soup=soup,
             )
         except Exception as exc:  # malformed markup must never abort the search
             print(f"[JobSearchPlugin] Extraction failed for {hostname(url)}: {type(exc).__name__}: {exc}", flush=True)
@@ -422,18 +462,48 @@ class JobSearchPlugin(BasePlugin):
         async def one(url: str) -> Optional[JobPosting]:
             async with semaphore:
                 fields = await llm_extract_job_fields(str(pages[url].get("content") or ""), llm_config)
-            return self._parse(url, pages[url], now, hints.get(url, ""), overrides=fields) if fields else None
+            if not fields:
+                return None
+            return await _off_loop(self._parse, url, pages[url], now, hints.get(url, ""), fields)
 
         return [job for job in await asyncio.gather(*(one(u) for u in eligible)) if job]
 
     # ── Application verification ──────────────────────────────────────────────
 
+    def _verify_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=_VERIFY_TIMEOUT_S,
+            follow_redirects=True,
+            max_redirects=_VERIFY_MAX_REDIRECTS,
+            headers=self._crawler.headers,
+            event_hooks={"request": [guard_request]},
+        )
+
     async def _verify_jobs(self, jobs: List[JobPosting], pages: PageMap) -> None:
         semaphore = asyncio.Semaphore(_VERIFY_CONCURRENCY)
+        client: Optional[httpx.AsyncClient] = None
 
-        async def one(job: JobPosting) -> None:
+        def shared_client() -> httpx.AsyncClient:
+            # Created lazily (most links reuse crawled pages) and shared, so connections and TLS setup are reused.
+            nonlocal client
+            if client is None:
+                client = self._verify_client()
+            return client
+
+        async def check(url: Optional[str]) -> Tuple[JobStatus, bool]:
             async with semaphore:
-                status, checked = await self._verify_application(job.application_url, pages)
+                return await self._verify_application(url, pages, shared_client)
+
+        # Several merged jobs can share one application link — check each distinct link once.
+        links = list(dict.fromkeys(j.application_url for j in jobs))
+        try:
+            results = dict(zip(links, await asyncio.gather(*(check(u) for u in links))))
+        finally:
+            if client is not None:
+                await client.aclose()
+
+        for job in jobs:
+            status, checked = results[job.application_url]
             if checked:
                 job.application_verified = status != "unknown"
                 job.last_verified_at = utcnow()
@@ -441,9 +511,9 @@ class JobSearchPlugin(BasePlugin):
             if job.status in ("unknown", "active") or status == "closed":
                 job.status = status
 
-        await asyncio.gather(*(one(j) for j in jobs))
-
-    async def _verify_application(self, url: Optional[str], pages: PageMap) -> Tuple[JobStatus, bool]:
+    async def _verify_application(
+        self, url: Optional[str], pages: PageMap, client_factory: Optional[Callable[[], httpx.AsyncClient]] = None
+    ) -> Tuple[JobStatus, bool]:
         """Return ``(status, checked)``. ``checked`` is True only if a real HTTP answer was evaluated."""
         if not url:
             return "unknown", False
@@ -454,54 +524,56 @@ class JobSearchPlugin(BasePlugin):
         cached = self._verify_cache.get(url)
         if cached is not None:
             return cached
-        result = await self._http_check(url)
+        result = await (self._http_check(url, client_factory()) if client_factory else self._http_check(url))
         if result[1]:
             self._verify_cache.set(url, result)
         return result
 
-    async def _http_check(self, url: str) -> Tuple[JobStatus, bool]:
-        """Bounded GET of an application URL. Access restrictions (401/403/429) are never read as 'closed'."""
+    async def _http_check(self, url: str, client: Optional[httpx.AsyncClient] = None) -> Tuple[JobStatus, bool]:
+        """Bounded GET of an application URL. Access restrictions (401/403/429) are never read as 'closed'.
+
+        ``client`` is an optional shared client from ``_verify_client``; without one a private client is used.
+        """
         if not await is_public_url(url):
             return "unknown", False
-        async with httpx.AsyncClient(
-            timeout=_VERIFY_TIMEOUT_S,
-            follow_redirects=True,
-            max_redirects=_VERIFY_MAX_REDIRECTS,
-            headers=self._crawler.headers,
-            event_hooks={"request": [guard_request]},
-        ) as client:
-            for attempt in range(_VERIFY_ATTEMPTS):
-                last_attempt = attempt == _VERIFY_ATTEMPTS - 1
-                try:
-                    async with client.stream("GET", url) as response:
-                        code = response.status_code
-                        body = b""
-                        if code == 200:
-                            async for chunk in response.aiter_bytes():
-                                body += chunk
-                                if len(body) >= _VERIFY_MAX_BODY_BYTES:
-                                    break
-                        final_url = str(response.url)
-                        encoding = response.encoding or "utf-8"
-                except BlockedURLError:
-                    return "unknown", False
-                except httpx.HTTPError:
-                    if last_attempt:
-                        return "unknown", False
-                    await asyncio.sleep(_VERIFY_BACKOFF_S * (2 ** attempt))
-                    continue
+        if client is None:
+            async with self._verify_client() as own_client:
+                return await self._http_check_with(url, own_client)
+        return await self._http_check_with(url, client)
 
-                if code == 200:
-                    text = visible_text(body.decode(encoding, errors="replace"))
-                    closed = page_signals_closed(text) or is_generic_landing(url, final_url)
-                    return ("possibly_closed" if closed else "active"), True
-                if code == 410:
-                    return "closed", True
-                if code == 404 and last_attempt:
-                    return "possibly_closed", True  # repeated 404 — likely removed, but not proven closed
-                if code == 404 or code == 429 or code >= 500:
-                    if not last_attempt:
-                        await asyncio.sleep(_VERIFY_BACKOFF_S * (2 ** attempt))
-                    continue
-                return "unknown", False  # 401/403/999 etc.: access restricted, says nothing about the job
+    async def _http_check_with(self, url: str, client: httpx.AsyncClient) -> Tuple[JobStatus, bool]:
+        for attempt in range(_VERIFY_ATTEMPTS):
+            last_attempt = attempt == _VERIFY_ATTEMPTS - 1
+            try:
+                async with client.stream("GET", url) as response:
+                    code = response.status_code
+                    body = bytearray()
+                    if code == 200:
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) >= _VERIFY_MAX_BODY_BYTES:
+                                break
+                    final_url = str(response.url)
+                    encoding = response.encoding or "utf-8"
+            except BlockedURLError:
+                return "unknown", False
+            except httpx.HTTPError:
+                if last_attempt:
+                    return "unknown", False
+                await asyncio.sleep(_VERIFY_BACKOFF_S * (2 ** attempt))
+                continue
+
+            if code == 200:
+                text = await _off_loop(visible_text, body.decode(encoding, errors="replace"))
+                closed = page_signals_closed(text) or is_generic_landing(url, final_url)
+                return ("possibly_closed" if closed else "active"), True
+            if code == 410:
+                return "closed", True
+            if code == 404 and last_attempt:
+                return "possibly_closed", True  # repeated 404 — likely removed, but not proven closed
+            if code == 404 or code == 429 or code >= 500:
+                if not last_attempt:
+                    await asyncio.sleep(_VERIFY_BACKOFF_S * (2 ** attempt))
+                continue
+            return "unknown", False  # 401/403/999 etc.: access restricted, says nothing about the job
         return "unknown", False

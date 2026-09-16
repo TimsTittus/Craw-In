@@ -319,6 +319,9 @@ _LOCATION_ALIASES: Dict[str, str] = {
     "england": "united kingdom",
     "uae": "united arab emirates",
 }
+_LOCATION_ALIAS_PATTERNS: Tuple[Tuple[Pattern[str], str], ...] = tuple(
+    (re.compile(rf"(?<![\w.]){re.escape(alias)}(?![\w.])"), target) for alias, target in _LOCATION_ALIASES.items()
+)
 
 _INDIA_TERMS = frozenset({
     "india", "bangalore", "mumbai", "delhi", "hyderabad", "chennai", "pune", "kolkata", "gurgaon",
@@ -339,8 +342,8 @@ KNOWN_LOCATIONS = frozenset(_INDIA_TERMS | (set(_LOCATION_ALIASES) - {"us", "u.s
 def canonical_location(text: str) -> str:
     """Lowercase and replace common aliases (Bengaluru → bangalore) for comparison only."""
     canon = " ".join(re.sub(r"[^\w\s,./-]", " ", (text or "").lower()).split())
-    for alias, target in _LOCATION_ALIASES.items():
-        canon = re.sub(rf"(?<![\w.]){re.escape(alias)}(?![\w.])", target, canon)
+    for pattern, target in _LOCATION_ALIAS_PATTERNS:
+        canon = pattern.sub(target, canon)
     return canon
 
 
@@ -356,7 +359,7 @@ def location_matches(wanted: str, job_location_text: str) -> bool:
 
 
 def is_india_location(locations: Iterable[str]) -> bool:
-    return any(term in canonical_location(loc) for loc in locations for term in _INDIA_TERMS)
+    return any(term in canon for canon in map(canonical_location, locations) for term in _INDIA_TERMS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
