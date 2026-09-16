@@ -39,7 +39,7 @@ export default function WorkspaceDashboard() {
   const [connected, setConnected] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LLMConfigState | null>(null);
-  const [pingStatus, setPingStatus] = useState<{ status: 'idle' | 'testing' | 'success' | 'error', message: string }>({ status: 'idle', message: '' });
+  const [pingStatus, setPingStatus] = useState<{ status: 'idle' | 'testing' | 'success' | 'warning' | 'error', message: string }>({ status: 'idle', message: '' });
   const [sidePanelDoc, setSidePanelDoc] = useState<AnalyzedResult | null>(null);
   const [jobOutcome, setJobOutcome] = useState<JobSearchOutcome>({ status: "idle" });
   const socketRef = useRef<WebSocket | null>(null);
@@ -199,7 +199,13 @@ export default function WorkspaceDashboard() {
       });
       if (res.ok) {
         const data = await res.json();
-        setPingStatus({ status: 'success', message: `Success! Active: ${data.config_active}` });
+        // The backend reaching Ollama is not the same as the model being loaded:
+        // `standby` means downloaded but idle, so it must not read as a green success.
+        if (data?.ping?.state === 'standby') {
+          setPingStatus({ status: 'warning', message: `Model offline: ${data.config_active}` });
+        } else {
+          setPingStatus({ status: 'success', message: `Success! Active: ${data.config_active}` });
+        }
       } else {
         let error = await res.text();
         try { error = JSON.parse(error).detail || error; } catch { }
@@ -281,8 +287,9 @@ export default function WorkspaceDashboard() {
 
                 {pingStatus.status !== 'idle' && (
                   <span className={`text-xs font-mono px-3 py-1.5 rounded ${pingStatus.status === 'success' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
-                    pingStatus.status === 'error' ? 'bg-rose-900/50 text-rose-400 border border-rose-800' :
-                      'bg-slate-800 text-slate-300'
+                    pingStatus.status === 'warning' ? 'bg-amber-900/50 text-amber-400 border border-amber-800' :
+                      pingStatus.status === 'error' ? 'bg-rose-900/50 text-rose-400 border border-rose-800' :
+                        'bg-slate-800 text-slate-300'
                     }`}>
                     {pingStatus.message}
                   </span>

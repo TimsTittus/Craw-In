@@ -32,6 +32,16 @@ MAX_RESULT_LIMIT: int = 50
 _MAX_LIST_ITEMS: int = 10
 _MAX_TERM_CHARS: int = 80
 
+# Form entries meaning "nothing specified" ("Skills: Nil") must never become a hard criterion.
+_PLACEHOLDER_TERMS = frozenset({
+    "nil", "none", "null", "na", "n/a", "n.a", "n.a.", "no", "nothing", "not applicable", "any", "anything",
+    "-", "--", ".", "nope",
+})
+
+
+def is_placeholder(term: str) -> bool:
+    return term.strip().lower() in _PLACEHOLDER_TERMS
+
 
 def _clean_terms(value: Any) -> List[str]:
     """Accept a list or comma-separated string; strip, de-duplicate (case-insensitive) and bound it."""
@@ -46,7 +56,7 @@ def _clean_terms(value: Any) -> List[str]:
         if not isinstance(item, str):
             continue
         term = " ".join(item.split())[:_MAX_TERM_CHARS]
-        if term and term.lower() not in seen:
+        if term and not is_placeholder(term) and term.lower() not in seen:
             seen.add(term.lower())
             cleaned.append(term)
     return cleaned[:_MAX_LIST_ITEMS]
@@ -77,7 +87,7 @@ class JobSearchFilters(BaseModel):
     @field_validator("role", "salary_currency", mode="before")
     @classmethod
     def _blank_to_none(cls, value: Any) -> Any:
-        if isinstance(value, str) and not value.strip():
+        if isinstance(value, str) and (not value.strip() or is_placeholder(value)):
             return None
         return value.strip() if isinstance(value, str) else value
 

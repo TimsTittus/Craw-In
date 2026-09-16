@@ -1,8 +1,62 @@
 import abc
 import json
-from typing import Optional, Dict, Any, AsyncGenerator
+import re
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, AsyncGenerator, List
 from pydantic import BaseModel, Field, model_validator
 import httpx
+
+# Ollama stamps /api/ps timestamps with nanosecond precision, which
+# datetime.fromisoformat rejects; trim the fraction to microseconds.
+_OVERLONG_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def _parse_ollama_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an Ollama timestamp, returning None if it cannot be understood."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = _OVERLONG_FRACTION.sub(r"\1", value.strip())
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_resident(entry: Dict[str, Any]) -> bool:
+    """True while an /api/ps entry is still held in memory.
+
+    Ollama keeps listing a model for a short while after its keep-alive window
+    closes, so an entry with an expiry in the past is not actually loaded.
+    """
+    expires_at = _parse_ollama_timestamp(entry.get("expires_at"))
+    if expires_at is None:
+        return True
+    return expires_at > datetime.now(timezone.utc)
+
+
+def _matches_model(target: str, candidates: List[Optional[str]]) -> bool:
+    """Match a configured model against Ollama names, tolerating a missing tag."""
+    return any(
+        name == target or (isinstance(name, str) and name.startswith(f"{target}:"))
+        for name in candidates
+    )
+
+
+class LLMPingStatus(BaseModel):
+    """Structured outcome of a connectivity check.
+
+    ``ping()`` only ever returned a string, so a reachable-but-idle backend was
+    indistinguishable from a live one. ``state`` carries that difference:
+    ``active`` (model loaded), ``standby`` (reachable, nothing loaded) or
+    ``ready`` (provider reachable, residency not applicable).
+    """
+    ok: bool = True
+    state: str = "ready"
+    model: str = ""
+    detail: str = ""
 
 class LLMConfig(BaseModel):
     provider: str = Field(..., description="local_ollama, cloud_openai, cloud_anthropic, cloud_deepseek")
@@ -30,6 +84,11 @@ class BaseLLMClient(abc.ABC):
     async def ping(self) -> str:
         pass
 
+    async def ping_status(self) -> LLMPingStatus:
+        """Structured form of ping(). Providers without a residency concept are 'ready'."""
+        detail = await self.ping()
+        return LLMPingStatus(ok=True, state="ready", model=getattr(self, "model", ""), detail=detail)
+
 class OllamaClient(BaseLLMClient):
     def __init__(self, config: LLMConfig):
         self.base_url = config.base_url or "http://localhost:11434"
@@ -49,7 +108,7 @@ class OllamaClient(BaseLLMClient):
             
         res = await client.get(f"{base_url}/api/ps")
         res.raise_for_status()
-        models = res.json().get("models", [])
+        models = [m for m in res.json().get("models", []) if _is_resident(m)]
         if models:
             return base_url, models[0].get("name")
             
@@ -57,7 +116,7 @@ class OllamaClient(BaseLLMClient):
         if tags:
             return base_url, tags[0].get("name")
             
-        raise ValueError("No models available in Ollama.")
+        raise ValueError(f"No models are downloaded in Ollama at {self.base_url}. Pull one first, e.g. `ollama pull qwen2.5:7b`.")
 
     async def generate(self, system_prompt: str, user_prompt: str, response_format: Optional[str] = None) -> str:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -90,6 +149,9 @@ class OllamaClient(BaseLLMClient):
                         yield json.loads(line).get("response", "")
 
     async def ping(self) -> str:
+        return (await self.ping_status()).detail
+
+    async def ping_status(self) -> LLMPingStatus:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 base_url, actual_model = await self._resolve_endpoint_and_model(client)
@@ -99,31 +161,40 @@ class OllamaClient(BaseLLMClient):
                 res.raise_for_status()
                 available_models = [m.get("name") for m in res.json().get("models", [])]
                 
-                model_exists = any(
-                    m == actual_model or m.startswith(f"{actual_model}:")
-                    for m in available_models
-                )
-                
-                if not model_exists:
+                if not _matches_model(actual_model, available_models):
                     raise ValueError(f"Model '{actual_model}' is not downloaded in Ollama. Please run `ollama run {actual_model}` first.")
                 
-                # Check if it's dynamically running in memory right now
+                # Check if it's dynamically running in memory right now. Entries whose
+                # keep-alive has lapsed are still listed briefly, so they don't count.
                 res_ps = await client.get(f"{base_url}/api/ps")
                 res_ps.raise_for_status()
-                running_models = [m.get("name") for m in res_ps.json().get("models", [])]
+                running_models = [
+                    m.get("name") for m in res_ps.json().get("models", []) if _is_resident(m)
+                ]
                 
-                is_running = any(
-                    m == actual_model or m.startswith(f"{actual_model}:")
-                    for m in running_models
+                if _matches_model(actual_model, running_models):
+                    return LLMPingStatus(
+                        ok=True,
+                        state="active",
+                        model=actual_model,
+                        detail=f"{actual_model} (Active in Memory)",
+                    )
+                
+                return LLMPingStatus(
+                    ok=True,
+                    state="standby",
+                    model=actual_model,
+                    detail=f"{actual_model} is NOT running (downloaded, loads on first request)",
                 )
-                
-                if is_running:
-                    return f"{actual_model} (Active in Memory)"
-                else:
-                    return f"{actual_model} (Standby - Lazy Load)"
                     
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.ConnectTimeout):
             raise ValueError(f"Failed to connect to Ollama at {self.base_url}. Ensure Ollama is running and accessible.")
+        except httpx.TimeoutException:
+            raise ValueError(f"Ollama at {self.base_url} did not respond within 5s. It may be busy loading a model.")
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(f"Ollama at {self.base_url} returned HTTP {exc.response.status_code} for {exc.request.url.path}.")
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Ollama request to {self.base_url} failed ({type(exc).__name__}: {exc}).")
 
 class OpenAIChatClient(BaseLLMClient):
     def __init__(self, config: LLMConfig):
@@ -187,6 +258,8 @@ class OpenAIChatClient(BaseLLMClient):
                 return self.model
         except httpx.ConnectError:
             raise ValueError(f"Failed to connect to API at {self.base_url}.")
+        except httpx.TimeoutException:
+            raise ValueError(f"API at {self.base_url} did not respond within 5s.")
 
 def get_llm_client(config: LLMConfig) -> BaseLLMClient:
     if config.provider == "local_ollama":

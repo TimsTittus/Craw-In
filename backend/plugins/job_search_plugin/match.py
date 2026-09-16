@@ -24,6 +24,7 @@ from backend.plugins.job_search_plugin.normalize import (
     canonical_location,
     company_key,
     detect_work_mode,
+    is_india_location,
     location_matches,
     normalize_phrase,
     skill_in_text,
@@ -69,6 +70,7 @@ _EMPLOYMENT_LABELS = {
 }
 _APPLICATION_BASE = {"direct_company": 0.85, "ats": 0.85, "job_board": 0.6, "external": 0.5, "unknown": 0.2}
 _STATUS_SEVERITY = {"unknown": 0, "active": 1, "possibly_closed": 2, "closed": 3}
+_INDIA_COUNTRY_LABELS = frozenset({"in", "ind", "india"})
 
 _JOBISH = re.compile(r"job|career|hiring|vacanc|opening|intern|position|apply|recruit|employment", re.I)
 _NO_SPONSORSHIP = re.compile(
@@ -347,6 +349,9 @@ def _location_component(job: JobPosting, spec: JobSearchQuery) -> Component:
         return 1.0, "Remote", None
     if not location_text and job.remote is None:
         return UNKNOWN_SCORE, None, "Location unknown"
+    if job.locations and all(loc.strip().lower() in _INDIA_COUNTRY_LABELS for loc in job.locations) \
+            and is_india_location(spec.locations):
+        return UNKNOWN_SCORE, None, "Listed for India (city not stated)"  # country-wide, not a known mismatch
     return (0.3 if not spec.locations else 0.0), None, f"Location: {location_text or job.remote}"
 
 

@@ -158,6 +158,14 @@ async def test_structured_filters_override_prompt():
     assert spec.skills[0] == "Splunk"
 
 
+
+@pytest.mark.asyncio
+async def test_placeholder_filter_values_are_ignored():
+    spec, _ = await build_query("", {"role": "AI Researcher", "skills": "Nil", "locations": "Bangalore, none",
+                                     "employment_type": "internship"}, None)
+    assert spec.skills == [] and spec.locations == ["Bangalore"]
+    assert not any("Nil" in q for q in generate_search_queries(spec))
+
 @pytest.mark.asyncio
 async def test_llm_values_must_be_grounded_in_the_prompt(monkeypatch):
     monkeypatch.setattr(llm_assist, "_generate_json", AsyncMock(return_value={
@@ -335,6 +343,16 @@ def test_known_location_mismatch_is_excluded():
     ranked, rejected = rank_jobs([abroad, local], spec, NOW)
     assert [j.company for j in ranked] == ["Acme"] and rejected == 1
 
+
+
+def test_country_only_location_and_intern_title_are_not_rejected():
+    job = _parse("https://www.linkedin.com/jobs/view/3900000033",
+                 _job_html("Security Analyst Intern", "Acme", "", country="IN", employment="FULL_TIME"))
+    job.locations = ["IN"]
+    assert job.employment_type == "internship"
+    spec = JobSearchQuery(original="x", roles=["security analyst"], locations=["Bangalore"], employment_types=["internship"])
+    ranked, rejected = rank_jobs([job], spec, NOW)
+    assert len(ranked) == 1 and rejected == 0
 
 def test_expired_posting_is_closed_and_excluded():
     job = _parse("https://www.linkedin.com/jobs/view/3900000004",

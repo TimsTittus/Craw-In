@@ -494,7 +494,10 @@ def parse_job_page(
         or detect_work_mode(title)
         or (detect_work_mode(labelled_mode.group(1)) if labelled_mode else None)
     )
-    employment = normalize_employment_type(employment_raw) or normalize_employment_type(title)
+    # An explicit "Intern" title beats a generic structured label (many boards default to FULL_TIME).
+    title_employment = normalize_employment_type(title)
+    employment = (title_employment if title_employment == "internship" else None) \
+        or normalize_employment_type(employment_raw) or title_employment
     description = description[:_DESCRIPTION_MAX_CHARS]
     experience = experience or parse_experience(description)
     exp_min, exp_max = experience if experience else (None, None)
