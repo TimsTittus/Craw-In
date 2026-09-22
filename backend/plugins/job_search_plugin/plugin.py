@@ -51,9 +51,11 @@ from backend.plugins.job_search_plugin.schema import (
     JobPosting,
     JobSearchQuery,
     JobSearchReport,
+    JobSearchStages,
     JobSearchSummary,
     JobStatus,
     SearchQueryStatus,
+    StageItem,
 )
 from backend.plugins.job_search_plugin.urls import (
     BlockedURLError,
@@ -152,6 +154,43 @@ def _describe_spec(spec: JobSearchQuery, parser: str) -> str:
     return " · ".join(parts) + f" — via {parser}"
 
 
+_STAGE_LABEL_CHARS: int = 140
+_STAGE_DETAIL_CHARS: int = 120
+_KIND_LABELS: Dict[str, str] = {"posting": "posting", "listing": "listing page", "unknown": "unclassified"}
+_APPLICATION_LABELS: Dict[str, str] = {
+    "direct_company": "company site", "ats": "company ATS", "job_board": "job board",
+    "external": "external site", "unknown": "unknown source",
+}
+
+
+def _stage_item(label: str, url: str, detail: str = "", ok: bool = True) -> StageItem:
+    """One display row behind a summary counter; an untitled row falls back to its host."""
+    text = " ".join(str(label).split())[:_STAGE_LABEL_CHARS]
+    return StageItem(
+        label=text or hostname(url) or "Untitled",
+        url=url or None,
+        detail=" ".join(detail.split())[:_STAGE_DETAIL_CHARS] or None,
+        ok=ok,
+    )
+
+
+def _where(job: JobPosting) -> str:
+    return ", ".join(job.locations) or job.remote or "location not stated"
+
+
+def _job_stage_item(job: JobPosting, detail: str) -> StageItem:
+    return _stage_item(job.title, job.application_url or job.source_url, detail)
+
+
+def _crawl_detail(page: Dict[str, Any], extracted: bool) -> str:
+    """Why a crawled page did or did not become a job posting."""
+    tier = str(page.get("source") or "unknown")
+    status = page.get("status")
+    if status != 200:
+        return f"not fetched · {tier}" + (f" · HTTP {status}" if isinstance(status, int) and status else "")
+    return ("job extracted" if extracted else "no single posting on this page") + f" · {tier}"
+
+
 class JobSearchPlugin(BasePlugin):
     """Finds, deduplicates, ranks and verifies job postings for natural-language requirements."""
 
@@ -176,6 +215,7 @@ class JobSearchPlugin(BasePlugin):
         started = time.monotonic()
         now = utcnow()
         summary = JobSearchSummary()
+        stages = JobSearchStages()  # the items behind each counter, for the dashboard's expandable tiles
         for cache in (self._page_cache, self._verify_cache, _urls._DNS_CACHE):
             _prune_expired(cache)
 
@@ -207,6 +247,19 @@ class JobSearchPlugin(BasePlugin):
 
         candidates = self._build_candidates(results)
         summary.discovered, summary.unique = len(results), len(candidates)
+        stages.discovered = [
+            _stage_item(str(item.get("title") or ""), str(item.get("url") or ""), hostname(str(item.get("url") or "")))
+            for item in results
+        ]
+        stages.unique = [
+            _stage_item(
+                candidate.title,
+                candidate.url,
+                f"{hostname(candidate.url)} · {_KIND_LABELS.get(candidate.kind, candidate.kind)}"
+                + (f" · seen {candidate.hits}×" if candidate.hits > 1 else ""),
+            )
+            for candidate in candidates
+        ]
         await emit("candidates_discovered", "Candidate Pool", "completed", f"{len(results)} candidate results discovered.")
         await emit("deduplication_completed", "Deduplication", "completed",
                    f"{len(candidates)} unique job candidates after URL normalisation "
@@ -217,7 +270,7 @@ class JobSearchPlugin(BasePlugin):
         await emit("ranking_started", "Candidate Pre-Ranking", "completed",
                    f"Selected top {len(first_wave)} of {len(candidates)} candidates for deep crawling.")
 
-        jobs, pages = await self._crawl_and_extract(first_wave, llm_config, now, summary, emit)
+        jobs, pages = await self._crawl_and_extract(first_wave, llm_config, now, summary, stages, emit)
         if summary.crawl_failures:
             warnings.append(f"{summary.crawl_failures} pages could not be fetched (blocked, rate-limited or unavailable).")
 
@@ -229,6 +282,10 @@ class JobSearchPlugin(BasePlugin):
 
         qualified, rejected = rank_jobs(jobs, spec, now)
         summary.qualified = len(qualified)
+        stages.qualified = [
+            _job_stage_item(job, f"{job.company or 'company not stated'} · {_where(job)} · {job.match_score}% match")
+            for job in qualified
+        ]
         shortlist = qualified[: spec.limit + _VERIFY_EXTRA]
 
         await emit("verification_completed", "Verifying Applications", "running",
@@ -238,7 +295,13 @@ class JobSearchPlugin(BasePlugin):
         final = verified[: spec.limit]
         summary.rejected = rejected + dropped
         summary.returned = len(final)
-        summary.verified_applications = sum(j.application_verified and j.status == "active" for j in final)
+        verified_links = [j for j in final if j.application_verified and j.status == "active"]
+        summary.verified_applications = len(verified_links)
+        stages.verified_applications = [
+            _job_stage_item(job, f"{job.company or 'company not stated'} · "
+                                 f"{_APPLICATION_LABELS.get(job.application_type, 'unknown source')} · checked live")
+            for job in verified_links
+        ]
         await emit("verification_completed", "Verifying Applications", "completed",
                    f"{summary.verified_applications} of {len(final)} application links verified active.")
 
@@ -246,7 +309,8 @@ class JobSearchPlugin(BasePlugin):
         await emit("job_search_completed", "Job Search", "completed",
                    f"Returned {len(final)} ranked jobs in {summary.duration_seconds:.1f}s.")
         print(f"[JobSearchPlugin] Completed: {summary.model_dump()}", flush=True)
-        report = JobSearchReport(query=query_info, summary=summary, search_status=statuses, jobs=final, warnings=warnings)
+        report = JobSearchReport(query=query_info, summary=summary, stages=stages,
+                                 search_status=statuses, jobs=final, warnings=warnings)
         return [report.model_dump(mode="json")]
 
     async def _fail(
@@ -352,12 +416,14 @@ class JobSearchPlugin(BasePlugin):
         llm_config: Optional[Dict[str, Any]],
         now: datetime.datetime,
         summary: JobSearchSummary,
+        stages: JobSearchStages,
         emit: EmitFn,
     ) -> Tuple[List[JobPosting], PageMap]:
         host_slots: Dict[str, asyncio.Semaphore] = {}
         pages: PageMap = {}
         jobs: List[JobPosting] = []
         unparsed: List[str] = []
+        extracted: Dict[str, str] = {}  # crawled url → title of the job it yielded
         hints = {c.url: c.title for c in first_wave}
         seen_keys = {c.key for c in first_wave}
         total = len(first_wave)
@@ -376,6 +442,7 @@ class JobSearchPlugin(BasePlugin):
                     job, links = await _off_loop(self._parse_or_harvest, url, page, now, hints.get(url, ""))
                     if job:
                         jobs.append(job)
+                        extracted[url] = job.title
                     else:
                         unparsed.append(url)
                         harvested.extend(links)
@@ -402,9 +469,17 @@ class JobSearchPlugin(BasePlugin):
             await crawl(second_wave)
 
         if llm_config:
-            jobs.extend(await self._llm_fallback(unparsed, pages, llm_config, now, hints))
+            for url, job in await self._llm_fallback(unparsed, pages, llm_config, now, hints):
+                jobs.append(job)
+                extracted[url] = job.title
 
         summary.extracted = len(jobs)
+        # Fetched pages first — the counter is about those; the rest are listed for context only.
+        stages.crawled = [
+            _stage_item(extracted.get(url) or hints.get(url, ""), url,
+                        _crawl_detail(page, url in extracted), ok=page.get("status") == 200)
+            for url, page in sorted(pages.items(), key=lambda entry: entry[1].get("status") != 200)
+        ]
         await emit("job_extracted", "Deep Crawl", "completed",
                    f"Crawled {summary.crawled} pages ({summary.crawl_failures} unavailable) · {len(jobs)} jobs extracted.")
         return jobs, pages
@@ -451,22 +526,26 @@ class JobSearchPlugin(BasePlugin):
         llm_config: Dict[str, Any],
         now: datetime.datetime,
         hints: Dict[str, str],
-    ) -> List[JobPosting]:
-        """Targeted LLM reading for a few pages deterministic extraction could not parse."""
+    ) -> List[Tuple[str, JobPosting]]:
+        """Targeted LLM reading for a few pages deterministic extraction could not parse.
+
+        Returns ``(page url, job)`` pairs so the caller can record which page yielded which job.
+        """
         eligible = [
             u for u in urls
             if classify_url(u) != "listing" and len(str(pages[u].get("content") or "")) >= _LLM_MIN_TEXT_CHARS
         ][:_LLM_EXTRACT_MAX_PAGES]
         semaphore = asyncio.Semaphore(_LLM_EXTRACT_CONCURRENCY)
 
-        async def one(url: str) -> Optional[JobPosting]:
+        async def one(url: str) -> Optional[Tuple[str, JobPosting]]:
             async with semaphore:
                 fields = await llm_extract_job_fields(str(pages[url].get("content") or ""), llm_config)
             if not fields:
                 return None
-            return await _off_loop(self._parse, url, pages[url], now, hints.get(url, ""), fields)
+            job = await _off_loop(self._parse, url, pages[url], now, hints.get(url, ""), fields)
+            return (url, job) if job else None
 
-        return [job for job in await asyncio.gather(*(one(u) for u in eligible)) if job]
+        return [pair for pair in await asyncio.gather(*(one(u) for u in eligible)) if pair]
 
     # ── Application verification ──────────────────────────────────────────────
 

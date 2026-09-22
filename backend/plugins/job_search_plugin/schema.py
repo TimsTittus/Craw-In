@@ -199,6 +199,33 @@ class SearchQueryStatus(BaseModel):
     error: Optional[str] = None
 
 
+_MAX_STAGE_ITEMS: int = 200
+
+
+class StageItem(BaseModel):
+    """One entry behind a summary counter, so the dashboard can show what a number is made of."""
+
+    label: str
+    url: Optional[str] = None
+    detail: Optional[str] = None
+    ok: bool = True  # False → shown for context but not counted (e.g. a page that could not be fetched)
+
+
+class JobSearchStages(BaseModel):
+    """The items behind each counter in ``JobSearchSummary``. Display only, and bounded."""
+
+    discovered: List[StageItem] = Field(default_factory=list)
+    unique: List[StageItem] = Field(default_factory=list)
+    crawled: List[StageItem] = Field(default_factory=list)
+    qualified: List[StageItem] = Field(default_factory=list)
+    verified_applications: List[StageItem] = Field(default_factory=list)
+
+    @field_validator("discovered", "unique", "crawled", "qualified", "verified_applications")
+    @classmethod
+    def _bound(cls, value: List[StageItem]) -> List[StageItem]:
+        return value[:_MAX_STAGE_ITEMS]
+
+
 class JobSearchSummary(BaseModel):
     queries_generated: int = 0
     searches_failed: int = 0
@@ -219,6 +246,7 @@ class JobSearchSummary(BaseModel):
 class JobSearchReport(BaseModel):
     query: Dict[str, Any]
     summary: JobSearchSummary = Field(default_factory=JobSearchSummary)
+    stages: JobSearchStages = Field(default_factory=JobSearchStages)
     search_status: List[SearchQueryStatus] = Field(default_factory=list)
     jobs: List[JobPosting] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)

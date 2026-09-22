@@ -5,6 +5,7 @@ import {
   ArrowUpRight,
   Briefcase,
   CheckCircle,
+  ChevronDown,
   Clock,
   ExternalLink,
   FileText,
@@ -21,10 +22,21 @@ import {
   type JobPosting,
   type JobSearchOutcome,
   type JobSearchReport,
+  type StageItem,
+  type StageKey,
 } from '@/lib/job-search';
 
 const MAX_SKILLS_SHOWN = 8;
 const MAX_NOTES_SHOWN = 5;
+
+/** The summary tiles, each expandable into the items the backend counted for it. */
+const STAGE_TILES: { key: StageKey; label: string; blurb: string }[] = [
+  { key: 'discovered', label: 'Discovered', blurb: 'every result the search queries returned, before dedup' },
+  { key: 'unique', label: 'Unique', blurb: 'candidate pages left after URL normalisation and dedup' },
+  { key: 'crawled', label: 'Crawled', blurb: 'pages fetched and read during the deep crawl' },
+  { key: 'qualified', label: 'Qualified', blurb: 'jobs that passed ranking against your requirements' },
+  { key: 'verified_applications', label: 'Verified links', blurb: 'application links checked live just now' },
+];
 
 function scoreClass(score: number): string {
   if (score >= 80) return 'text-emerald-400 border-emerald-800/60 bg-emerald-950/30';
@@ -155,23 +167,118 @@ function JobCard({ job, onViewDetails }: { job: JobPosting; onViewDetails: (job:
   );
 }
 
-function SummaryStrip({ report }: { report: JobSearchReport }) {
-  const { summary } = report;
-  const stats = [
-    ['Discovered', summary.discovered],
-    ['Unique', summary.unique],
-    ['Crawled', summary.crawled],
-    ['Qualified', summary.qualified],
-    ['Verified links', summary.verified_applications],
-  ] as const;
+function StagePanel(
+  { id, label, blurb, items, count }: { id: string; label: string; blurb: string; items: StageItem[]; count: number },
+) {
+  const counted = items.filter((item) => item.ok).length;
+  const context = items.length - counted;
   return (
-    <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-      {stats.map(([label, value]) => (
-        <div key={label} className="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
-          <div className="text-lg font-bold text-white">{value}</div>
-        </div>
-      ))}
+    <div
+      id={id}
+      className="bg-slate-900/60 border border-slate-800 rounded-lg p-3 space-y-2 animate-in fade-in slide-in-from-top-1"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <p className="text-[11px] text-slate-300">
+          {label} <span className="text-slate-500">— {blurb}</span>
+        </p>
+        <p className="text-[10px] text-slate-500">
+          {/* The backend caps each list, so say so rather than contradict the tile. */}
+          {counted < count ? `first ${counted} of ${count}` : `${counted} listed`}
+          {context > 0 ? ` · ${context} not counted` : ''}
+        </p>
+      </div>
+      <ul className="max-h-80 overflow-y-auto space-y-1 pr-1">
+        {items.map((item, index) => (
+          <li
+            key={`${item.url ?? item.label}-${index}`}
+            className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-950/40 border border-slate-800/60"
+          >
+            <span className="w-6 shrink-0 text-right text-[10px] leading-4 text-slate-600">{index + 1}</span>
+            <div className="min-w-0 flex-1">
+              <p className={`text-[11px] break-words ${item.ok ? 'text-slate-200' : 'text-amber-300/90'}`}>{item.label}</p>
+              {item.detail && <p className="text-[10px] text-slate-500 break-words">{item.detail}</p>}
+            </div>
+            {item.url && (
+              <a
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={item.url}
+                className="shrink-0 p-1 text-slate-500 hover:text-white transition-colors"
+              >
+                <ExternalLink className="w-3 h-3" />
+                <span className="sr-only">Open {item.label}</span>
+              </a>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SummaryStrip({ report }: { report: JobSearchReport }) {
+  const { summary, stages } = report;
+  const [openStage, setOpenStage] = React.useState<StageKey | null>(null);
+  const [shownReport, setShownReport] = React.useState(report);
+  const panelId = React.useId();
+
+  // A new report replaces the numbers under the tiles, so any open panel no longer belongs to them.
+  if (report !== shownReport) {
+    setShownReport(report);
+    setOpenStage(null);
+  }
+
+  const open = openStage ? STAGE_TILES.find((tile) => tile.key === openStage) : undefined;
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        {STAGE_TILES.map(({ key, label }) => {
+          const items = stages[key];
+          const isOpen = openStage === key;
+          const tile = (
+            <>
+              <div className="flex items-center justify-between gap-1 text-[10px] uppercase tracking-wider text-slate-500">
+                {label}
+                {items.length > 0 && (
+                  <ChevronDown className={`w-3 h-3 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                )}
+              </div>
+              <div className="text-lg font-bold text-white">{summary[key]}</div>
+            </>
+          );
+          if (items.length === 0) {
+            // Older payloads carry counts but no items — the tile stays a plain, non-interactive stat.
+            return (
+              <div key={key} className="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">{tile}</div>
+            );
+          }
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setOpenStage(isOpen ? null : key)}
+              aria-expanded={isOpen}
+              aria-controls={isOpen ? panelId : undefined}
+              className={`text-left bg-slate-900/60 border rounded-lg px-3 py-2 transition-colors cursor-pointer
+                hover:border-slate-700 hover:bg-slate-900
+                ${isOpen ? 'border-emerald-700/70 bg-slate-900' : 'border-slate-800'}`}
+            >
+              {tile}
+            </button>
+          );
+        })}
+      </div>
+      {open && (
+        <StagePanel
+          id={panelId}
+          label={open.label}
+          blurb={open.blurb}
+          items={stages[open.key]}
+          count={summary[open.key]}
+        />
+      )}
     </div>
   );
 }

@@ -503,6 +503,21 @@ async def test_end_to_end_search_with_partial_source_failures(monkeypatch):
     assert all(j["company"] != "Globex" or j["match_score"] < top["match_score"] for j in jobs)
     assert [j["match_score"] for j in jobs] == sorted((j["match_score"] for j in jobs), reverse=True)
 
+    # Every summary counter is backed by the list of items the dashboard expands under it.
+    stages, summary = report["stages"], report["summary"]
+    assert len(stages["discovered"]) == summary["discovered"]
+    assert len(stages["unique"]) == summary["unique"]
+    assert len(stages["qualified"]) == summary["qualified"]
+    assert len(stages["verified_applications"]) == summary["verified_applications"]
+    fetched = [i for i in stages["crawled"] if i["ok"]]
+    assert len(fetched) == summary["crawled"]
+    assert len(stages["crawled"]) - len(fetched) == summary["crawl_failures"]
+    assert all(i["ok"] for i in stages["crawled"][:len(fetched)])  # fetched pages listed first
+    assert all(item["label"] and str(item["url"]).startswith("http")
+               for group in stages.values() for item in group)
+    assert "seen" in next(i["detail"] for i in stages["unique"] if "linkedin" in i["url"])
+    assert all("job extracted" in i["detail"] for i in fetched if i["label"] in (top["title"], "Senior Security Architect"))
+
     emitted = [e[0] for e in events]
     for expected in ("job_search_started", "query_parsed", "queries_generated", "search_started",
                      "search_source_completed", "candidates_discovered", "deduplication_completed",

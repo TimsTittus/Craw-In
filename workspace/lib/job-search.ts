@@ -49,6 +49,21 @@ export interface JobPosting {
   concerns: string[];
 }
 
+/** One row behind a summary counter (backend ``StageItem``). */
+export interface StageItem {
+  label: string;
+  url: string | null;
+  detail: string | null;
+  /** False → listed for context but not part of the counter (e.g. a page that could not be fetched). */
+  ok: boolean;
+}
+
+export type StageKey = "discovered" | "unique" | "crawled" | "qualified" | "verified_applications";
+
+export type JobSearchStages = Record<StageKey, StageItem[]>;
+
+export const STAGE_KEYS: readonly StageKey[] = ["discovered", "unique", "crawled", "qualified", "verified_applications"];
+
 export interface JobSearchSummary {
   queries_generated: number;
   searches_failed: number;
@@ -63,6 +78,8 @@ export interface JobSearchSummary {
 
 export interface JobSearchReport {
   summary: JobSearchSummary;
+  /** Items behind each counter. Empty lists when the backend did not send them. */
+  stages: JobSearchStages;
   jobs: JobPosting[];
   warnings: string[];
   error: string | null;
@@ -110,6 +127,8 @@ const APPLICATION_TYPES: readonly ApplicationType[] = ["direct_company", "ats", 
 const WORK_MODES: readonly WorkMode[] = ["remote", "hybrid", "onsite"];
 const EMPLOYMENT_TYPES = Object.keys(EMPLOYMENT_LABELS) as EmploymentType[];
 const MAX_LIST_ITEMS = 30;
+const MAX_STAGE_ITEMS = 200;
+const MAX_STAGE_TEXT = 200;
 const DAY_MS = 86_400_000;
 
 // ── Runtime validation: the payload crosses a network boundary and wraps untrusted page data ──
@@ -152,6 +171,27 @@ function postedLabel(postedAt: string | null, estimated: boolean, now: number): 
   const days = Math.max(0, Math.floor((now - time) / DAY_MS));
   const label = days === 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
   return estimated ? `~${label}` : label;
+}
+
+function parseStageItems(value: unknown): StageItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_STAGE_ITEMS).flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const label = str(entry.label);
+    if (!label) return [];
+    const detail = str(entry.detail);
+    return [{
+      label: label.slice(0, MAX_STAGE_TEXT),
+      url: safeHttpUrl(entry.url),
+      detail: detail ? detail.slice(0, MAX_STAGE_TEXT) : null,
+      ok: entry.ok !== false,
+    }];
+  });
+}
+
+function parseStages(value: unknown): JobSearchStages {
+  const source = isRecord(value) ? value : {};
+  return Object.fromEntries(STAGE_KEYS.map((key) => [key, parseStageItems(source[key])])) as JobSearchStages;
 }
 
 function parseJob(value: unknown, now: number): JobPosting | null {
@@ -226,6 +266,7 @@ export function parseJobSearchReport(value: unknown, now: number = Date.now()): 
       verified_applications: count("verified_applications"),
       duration_seconds: count("duration_seconds"),
     },
+    stages: parseStages(value.stages),
     jobs,
     warnings: strList(value.warnings),
     error,
